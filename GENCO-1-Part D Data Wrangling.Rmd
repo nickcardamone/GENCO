@@ -1,0 +1,259 @@
+---
+title: "GENCO-1-Part D Data Wrangling"
+author: "Nicholas Cardamone"
+date: "10/3/2024"
+output: html_document
+---
+
+# Goal: 
+* Use 2006-2023 Part D formulary files for stand-alone Medicare Part D and Medicare Advantage prescription drug plans to identify plans’ use of prior authorization, quantity limits, and step therapy for each unique brand-generic-dose-formulary combination (‘molecule’) of orally administered drugs in each year after NME approva
+
+# What this code does:
+1. Connects to online Dropbox database via unique account token.
+2. Finds all formulary files **only** downloads those files (they all start with the phrase "basic drugs formulary").
+3. The files have different formats (.dta vs. .txt vs. .zip) so the code will clean them in different ways depending on what format they're in. Then it will smash the datasets together.
+4. There is one very weird dataset, 2006-06, which had to be cleaned manually then bound with the others.
+5. Output of full_data.csv is all Part D files from 2006-06 to 2023-12.
+
+# Notes:
+* I had to manually unzip all of the zip files and extract the .txt files within them because for an unknown reason when R was unzipping and reading the files, it was omitting portions of the data.
+
+# Next edits:
+* Extract quantity limits data from formulary files.
+* Extract step therapy from formulary files.
+
+
+```{r, Load necessary packages}
+library(rdrop2) # connect to dropbox
+library(httr)
+library(stringr)
+library(lubridate)
+library(haven)
+
+```
+
+```{r, Dropbox Connect Function}
+## This code alters a function in rdrop2 that will give us a refresh token every time the access token expires.
+## Source: https://stackoverflow.com/questions/71393752/get-a-refresh-token-for-dropbox-api-using-rdrop2-and-drop-auth
+.dstate <- new.env(parent = emptyenv())
+
+drop_auth_RT <- function (new_user = FALSE, key = "mmhfsybffdom42w", secret = "l8zeqqqgm1ne5z0", cache = TRUE, rdstoken = NA) 
+{
+  if (new_user == FALSE & !is.na(rdstoken)) {
+    if (file.exists(rdstoken)) {
+      .dstate$token <- readRDS(rdstoken)
+    }
+    else {
+      stop("token file not found")
+    }
+  }
+  else {
+    if (new_user && file.exists(".httr-oauth")) {
+      message("Removing old credentials...")
+      file.remove(".httr-oauth")
+    }
+    dropbox <- httr::oauth_endpoint(authorize = "https://www.dropbox.com/oauth2/authorize?token_access_type=offline",
+                                    access = "https://api.dropbox.com/oauth2/token")
+    # added "?token_access_type=offline" to the "authorize" parameter so that it can return an access token as well as a refresh token
+    dropbox_app <- httr::oauth_app("dropbox", key, secret)
+    dropbox_token <- httr::oauth2.0_token(dropbox, dropbox_app, 
+                                          cache = cache)
+    if (!inherits(dropbox_token, "Token2.0")) {
+      stop("something went wrong, try again")
+    }
+    .dstate$token <- dropbox_token
+  }
+}
+
+refreshable_token <- drop_auth_RT()
+
+```
+
+```{r, Set up Dropbox Token}
+# Authenticate your Dropbox account (you only need to do this once)
+#token <- drop_auth()
+saveRDS(refreshable_token, "my-token.rds")
+
+drop_auth(rdstoken = "my-token.rds") 
+token <- readRDS("my-token.rds")
+```
+
+```{r, Search Dropbox for relevant files}
+# Define the root folder path in Dropbox
+root_folder_path <- "GENCO"
+drop_acc() %>% data.frame()
+#drop_acc() %>% data.frame()
+# List all folders and files in the root folder
+all_files <- drop_dir(root_folder_path, dtoken= token)
+# Filter for .dta files that start with "basic drugs formulary"
+x <- drop_search("^basic drugs formulary")
+```
+
+```{r, Download relevant files locally}
+## Download files from GENCO dropbox:
+download_function <- function(match_item) {
+  drop_download(match_item$metadata$path_lower, local_path = "C://Users//Nick//Desktop//VA//GENCO", overwrite = TRUE)
+}
+
+# Apply the function to each element in the list using lapply
+lapply(x$matches, download_function)
+
+# Note: Some files' names needed to be edited slightly.
+# I downloaded and uploaded the 2006-06 data manually because it was different dataframe than the others.
+```
+
+
+```{r, Part D data upload}
+# Define the path to the folder containing the .dta, .txt, and .zip files
+folder_path <- "C://Users//Nick//Desktop//VA//GENCO"
+
+# List all .dta, .txt, and .zip files in the folder that end with "with drug names"
+all_files <- list.files(folder_path, pattern = ".(dta|txt|zip)$", full.names = TRUE)
+
+# Process the list of drug files and extract dates
+names_df <- data.frame(
+  name = basename(all_files)
+) %>%
+  mutate(
+    date = case_when(
+      # Extract exact date in YYYYMMDD format
+      str_detect(name, "\\d{8}") ~ str_extract(name, "\\d{8}"),
+      
+      # If the name contains a format like YYYY-12, convert it to YYYY1231
+      str_detect(name, "\\d{4}-12") ~ str_replace(str_extract(name, "\\d{4}-12"), "-12", "1231"),
+      
+      # If no date is found, extract the year and append 0630
+      str_detect(name, "\\d{4}") ~ paste0(str_extract(name, "\\d{4}"), "0630"),
+      
+      # Default NA if no date or year is found
+      TRUE ~ NA_character_
+    )
+  )
+
+# Function to convert characters to numeric and back
+convert_to_numeric <- function(x) {
+  as.numeric(as.factor(x))
+}
+
+convert_to_character <- function(x, original_values) {
+  levels <- levels(as.factor(original_values))
+  return(levels[x])
+}
+
+# Function to process each file based on the extracted date, with a sample of 50 observations
+process_file <- function(file_path, date_var) {
+  # Print the name of the file being processed
+  cat("Processing file:", basename(file_path), "\n")
+  
+  # Detect the file extension
+  file_extension <- file_ext(file_path)
+  
+  # Unzip if the file is a .zip and get the contained .txt file
+  if (file_extension == "zip") {
+    temp_dir <- tempdir()
+    unzip(file_path, exdir = temp_dir)
+    txt_files <- list.files(temp_dir, pattern = "\\.txt$", full.names = TRUE)
+    
+    if (length(txt_files) == 0) {
+      stop("No .txt file found in the zip archive")
+    }
+    
+    file_path <- txt_files[1]  # Assuming you want to process the first .txt file found
+    file_extension <- "txt"  # Update the extension to .txt for further processing
+  }
+  
+  # Read the file based on its extension
+  if (file_extension == "dta") {
+    data <- read_dta(file_path)
+  } else if (file_extension == "txt") {
+    data <- read_delim(file_path, delim = "|", col_types = cols())  # Reading with pipe delimiter
+  } else {
+    stop("Unsupported file type")
+  }
+  
+  # Convert all column names to lowercase
+  names(data) <- tolower(names(data))
+  
+  # Check if 'rxcui', 'drugname', and 'labelname' columns exist, if not, add them with NA values
+  if (!"rxcui" %in% names(data)) {
+    data$rxcui <- NA
+  }
+  if (!"drugname" %in% names(data)) {
+    data$drugname <- NA
+  }
+  
+  # Ensure consistent data types
+  data <- data %>%
+    mutate(
+      formulary_id = as.character(formulary_id),
+      rxcui = as.character(rxcui),
+      ndc = as.character(ndc), # national drug code
+      prior_authorization_yn = as.character(prior_authorization_yn),
+      step_therapy_yn = as.character(step_therapy_yn),
+      quantity_limit_yn = as.character(quantity_limit_yn)
+    )
+  
+  # Convert the date string to Date type
+  date_var <- as.Date(date_var, format = "%Y%m%d")
+  
+  # Select the required columns and add the "date" column
+  data_selected <- data %>%
+    select(formulary_id, rxcui, ndc, prior_authorization_yn, step_therapy_yn, quantity_limit_yn) %>%
+    mutate(date = date_var)
+}
+```
+
+```{r}
+# Apply the function to all files and combine the results into one data frame
+
+combined_data <- mapply(
+  process_file, 
+  all_files, 
+  names_df$date, 
+  SIMPLIFY = FALSE
+) %>% bind_rows()
+```
+
+# The 2006-06 formulary file is different from others, it has an extra level of nesting: contract_ID. I uploaded and manipulated it manually.
+# As of 10/3/2024 - we don't need to do this becuase we don't have any molecules that were approved before 2007.
+
+```{r, Read in 2006-06 file}
+# Switch outhe directory and file name as necessary
+
+extradat <- read_dta("C://Users//Nick//Desktop//VA//GENCO//extra file//different formulary file 20060630 with drug names.dta")
+```
+
+```{r, Check if prior authorization varies across contract ID.}
+set.seed(52)
+chk <- extradat %>% group_by(formulary_id) %>% slice_sample(n=50)
+
+chk2006 <- chk %>% group_by(formulary_id, ndc) %>% dplyr::summarise(prior_auth_yn = sum(prior_auth_yn == "Y")/ n(),
+                                                                    quantity_limit_yn = sum(quantity_limit_yn == "Y")/ n(), step_ther_yn = sum(step_ther_yn == "Y")/ n())
+
+# Spoiler - it doesn't.
+```
+
+```{r, Drop column ID and de-duplicate based on formulary ID and NDC}
+extradat2 <- extradat %>% select(formulary_id, ndc, prior_auth_yn) 
+extradat2 <- extradat2[!duplicated(extradat2[c(1,2)]),]
+```
+
+```{r, Clean up variables}
+extradat2$date = lubridate::ymd("20060630")
+extradat2$rxcui <- NA
+extradat2$prior_authorization_yn <- extradat2$prior_auth_yn
+extradat2 <- extradat2 %>% select(formulary_id, rxcui, ndc, prior_authorization_yn, date)
+```
+
+```{r, Join with full dataset:}
+extradat2$formulary_id <- as.character(extradat2$formulary_id)
+extradat2$ndc <- as.character(extradat2$ndc)
+
+full_data <- bind_rows(extradat2, combined_data)
+rm(combined_data, extradat, extradat2)
+```
+
+```{r, Create dataset}
+write.csv(combined_data, "part1-full_data.csv")
+```
+
