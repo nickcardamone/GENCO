@@ -1,0 +1,639 @@
+---
+title: "GENCO-3-Plan Enrollment"
+author: "Nicholas Cardamone"
+date: "10/8/2024"
+output: html_document
+---
+
+# Goals: Webscrape plan enrollment by month files, then download formulary-plan-period files to crosswalk enrollment to prior auth by formulary Medicare Part D dataset from Part 2. Aggregate a dataset with prior auth of plans by application number by period with plan enrollment numbers.
+
+# What this code does:
+1. Download formulary by plan by period files from Dropbox - save to a directory folder called "plan".
+2. Combine all formulary by plan by period files into one dataframe.
+3. Webscrape plan enrollment by month data from CMS website.
+3. Combine al plan enrollemnt by month data into one dataframe, summarize by first 6 months / last 6 moths of year.
+4. Join with formulary by period (with prior auth info) Medicare Part D dataset from Part D via formulary-plan-period crosswalk files from step 1 and step 2.
+5. Aggregate to the application number period to have a dataset with (1/0) if plan had a drug from this application number with prior auth rules in a period and enrollment numbers in this plan in a period.
+
+```{r setup, include=FALSE}
+library(rdrop2) # install_github("karthik/rdrop2") - use to connect to dropbox
+library(httr) # webscraping 
+library(stringr) # string manipulation
+library(lubridate) # date manipualtion
+library(haven) # webscraping
+library(dplyr) # data wrangling
+library(readr) # reading in different data types
+library(tools) # utility 
+library(devtools) # utility
+```
+
+```{r, Search Dropbox for relevant files}
+# Define the root folder path in Dropbox
+root_folder_path <- "GENCO"
+drop_acc() %>% data.frame()
+#drop_acc() %>% data.frame()
+# List all folders and files in the root folder
+all_files <- drop_dir(root_folder_path, dtoken= token)
+# Filter for .dta files that start with "basic drugs formulary"
+x <- drop_search("^plan information")
+```
+```{r, Download relevant files locally}
+# Create the download function with checks for existing files
+download_function <- function(match_item) {
+  # Define the local path where the file will be downloaded
+  local_file_path <- file.path("C://Users//Nick//Desktop//VA//GENCO//plan", basename(match_item$metadata$path_lower))
+  
+  # Check if the file already exists
+  if (!file.exists(local_file_path)) {
+    # Try downloading the file, handle any potential errors
+    tryCatch({
+      drop_download(match_item$metadata$path_lower, local_path = local_file_path, overwrite = TRUE)
+      cat("Downloaded:", local_file_path, "\n")
+    }, error = function(e) {
+      cat("Error downloading", match_item$metadata$path_lower, ":", e$message, "\n")
+    })
+  } else {
+    cat("File already exists, skipping download:", local_file_path, "\n")
+  }
+}
+
+# Apply the function to each element in the list using lapply
+lapply(x$matches, download_function)
+```
+
+```{r}
+# Define the path to the folder containing the .dta, .txt, and .zip files
+folder_path <- "C://Users//Nick//Desktop//VA//GENCO//plan"
+
+# List all .dta, .txt, and .zip files in the folder that end with "with drug names"
+all_files <- list.files(folder_path, pattern = ".(dta|txt|zip)$", full.names = TRUE)
+
+# Process the list of drug files and extract dates
+names_df <- data.frame(
+  name = basename(all_files)
+) %>%
+  mutate(
+    date = case_when(
+      # Extract exact date in YYYYMMDD format
+      str_detect(name, "\\d{8}") ~ str_extract(name, "\\d{8}"),
+      
+      # If the name contains a format like YYYY-12, convert it to YYYY1231
+      str_detect(name, "\\d{4}-12") ~ str_replace(str_extract(name, "\\d{4}-12"), "-12", "1231"),
+      
+      # If no date is found, extract the year and append 0630
+      str_detect(name, "\\d{4}") ~ paste0(str_extract(name, "\\d{4}"), "0630"),
+      
+      # Default NA if no date or year is found
+      TRUE ~ NA_character_
+    )
+  )
+
+# Function to process each file based on the extracted date, with a sample of 50 observations
+process_file <- function(file_path, date_var) {
+  # Print the name of the file being processed
+  cat("Processing file:", basename(file_path), "\n")
+  
+  # Detect the file extension
+  file_extension <- file_ext(file_path)
+  
+  # Unzip if the file is a .zip and get the contained .txt file
+  if (file_extension == "zip") {
+    temp_dir <- tempdir()
+    unzip(file_path, exdir = temp_dir)
+    txt_files <- list.files(temp_dir, pattern = "\\.txt$", full.names = TRUE)
+    
+    if (length(txt_files) == 0) {
+      stop("No .txt file found in the zip archive")
+    }
+    
+    file_path <- txt_files[1]  # Assuming you want to process the first .txt file found
+    file_extension <- "txt"  # Update the extension to .txt for further processing
+  }
+  
+  # Read the file based on its extension
+  if (file_extension == "dta") {
+    data <- read_dta(file_path)
+  } else if (file_extension == "txt") {
+    # Adjusting to read the specified headers
+    data <- read_delim(file_path, delim = "|", col_types = cols(), 
+                       col_names = c("CONTRACT_ID", "PLAN_ID", "SEGMENT_ID", "CONTRACT_NAME", "PLAN_NAME", 
+                                     "FORMULARY_ID", "PREMIUM", "DEDUCTIBLE", "ICL", "MA_REGION_CODE", 
+                                     "PDP_REGION_CODE", "STATE", "COUNTY_CODE", "SNP"))  
+  } else {
+    stop("Unsupported file type")
+  }
+  
+  # Convert all column names to lowercase for consistency
+  names(data) <- tolower(names(data))
+  
+  # Ensure consistent data types
+  data <- data %>%
+    mutate(
+      plan_id = as.character(plan_id),
+      formulary_id = as.character(formulary_id),
+      premium = as.character(premium),
+      deductible = as.character(deductible),
+      segment_id = as.character(segment_id),
+      snp = as.character(snp),
+      icl = as.character(icl)
+    )
+  
+  # Convert the date string to Date type
+  date_var <- as.Date(date_var, format = "%Y%m%d")
+  
+  # Select the required columns and add the "date" column
+  data_selected <- data %>%
+    select(contract_id, plan_id, segment_id, contract_name, plan_name, formulary_id, premium, deductible, icl,
+           ma_region_code, pdp_region_code, state, county_code, snp) %>%
+    mutate(date = date_var)
+  
+  return(data_selected)
+}
+
+```
+
+```{r, Run function on all plan files and combine}
+# Apply the function to all files and combine the results into one data frame
+
+combined_plan_data <- mapply(
+  process_file, 
+  all_files, 
+  names_df$date, 
+  SIMPLIFY = FALSE
+) %>% bind_rows()
+```
+```{r, Clean Plan Data}
+# Importantly - pad the plan_id with 0s to eventually join it to formulary-level data.
+combined_plan_data <- combined_plan_data %>% select(contract_id, plan_id, formulary_id, segment_id, date) %>% mutate(plan_id = str_pad(plan_id, 3, pad = "0")) %>% distinct()
+
+```
+
+```{r}
+write.csv(combined_plan_data, "C://Users//Nick//Desktop//VA//GENCO-Misc//combined_plan_data_n=134198-10-31-2024.csv")
+
+```
+
+```{r}
+combined_plan_data <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//combined_plan_data_n=134198-10-31-2024.csv")
+
+```
+
+```{r}
+
+combined_plan_data <- combined_plan_data %>% filter(segment_id != "SEGMENT_ID")
+combined_plan_data$segment_id <- as.factor(as.numeric(combined_plan_data$segment_id))
+combined_plan_data$plan_id <- as.factor(as.numeric(combined_plan_data$plan_id))
+
+```
+
+```{r}
+plan_org <- combined_plan_data %>% select(formulary_id, contract_id, plan_id, segment_id, date) %>% group_by(formulary_id, contract_id, plan_id, segment_id, date) %>% filter(segment_id != "SEGMENT_ID") %>% summarize(n = n())
+```
+
+```{r}
+plan_test <- plan_org %>% select(plan_id, segment_id, date) %>% group_by(plan_id, segment_id, date) %>% summarize(n = n())
+```
+
+```{r}
+combined_plan_data <- combined_plan_data %>% select(formulary_id, contract_id, plan_id, segment_id, date) %>% group_by(formulary_id, contract_id, plan_id, segment_id, date)
+```
+
+## Webscraping enrollment data:
+# 1.) Webscrape all links from list of monthly enrollment number webpages.
+# 2.) Open all such links and click the hyperlink to download the respective zip file.
+# 3.) Manually unzip all the .txt files using 7-ZIP.
+# 4.) Read .txt files and combine like we do above.
+
+```{r, Webscrape  Enrollment Data}
+## Give me R
+# Step 1: Read the main page and extract the links from the table
+main_url <- "https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/monthly-enrollment-plan"  # Replace with the URL of the main page
+
+# Read the HTML of the main page
+main_page <- read_html(main_url, user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
+
+# Extract all the links in the table
+links <- main_page %>%
+  html_nodes("table a") %>%  # Replace "table a" with the correct CSS selector for your table links
+  html_attr("href") %>%
+  unique()  # Ensure unique links
+```
+```{r}
+# Step 2: Create a function to extract the subsequent link from each page
+safe_get_subsequent_link <- function(link, retries = 3, sleep_time = 1) {
+  full_url <- url_absolute(link, main_url)
+  attempt <- 1  # Initialize attempt counter
+  
+  while (attempt <= retries) {
+    # Try to read the HTML and extract the link
+    tryCatch({
+      message("Attempt ", attempt, " for link: ", full_url)
+      
+      # Fetch the page with a user-agent and timeout
+      page <- read_html(GET(full_url, timeout(30), user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"))
+      
+      # Extract the link from the subsequent page
+      subsequent_link <- page %>%
+        html_nodes("li.field__item > a:nth-child(1)") %>%  # Use your CSS selector
+        html_attr("href") %>%  # Adjust this if it's not an <a> tag
+        unique() %>%
+        .[1]  # Assuming you want the first link found, adjust as necessary
+      
+      # If successful, return the extracted link
+      return(subsequent_link)
+    }, error = function(e) {
+      message("Error in attempt ", attempt, " for link: ", full_url, " - ", e$message)
+      
+      # Increment the attempt counter and sleep before retrying
+      attempt <- attempt + 1
+      Sys.sleep(sleep_time)  # Sleep for specified time between retries
+    })
+  }
+  
+  # If all retries fail, return NA to indicate the failure
+  message("All attempts failed for link: ", full_url)
+  return(NA)
+}
+
+# Step 2: Apply the retry logic to each link
+subsequent_links <- map(links, ~ safe_get_subsequent_link(.x))
+
+#Combine links and subsequent links into a data frame for easier inspection
+result <- data.frame(main_page_link = links, subsequent_page_link = subsequent_links)
+```
+
+```{r, Download zipped up .txt files from the list of links.}
+# Define the root URL
+root_url <- "https://www.cms.gov"
+
+# Prepend the root URL to all links in subsequent_links
+full_subsequent_links <- paste0(root_url, subsequent_links)
+```
+```{r}
+local_directory <- "C://Users//Nick//Desktop//VA//GENCO//enrollment"
+
+# Function to download the zip files with a timeout setting
+download_zip_file_with_timeout <- function(zip_url, save_dir, timeout_secs = 300) {
+  if (is.na(zip_url)) {
+    message("Skipping NA link")
+    return(NULL)
+  }
+  
+  # Define a simple filename based on the basename of the URL, removing query strings
+  file_name <- str_extract(basename(zip_url), "[^?]+")
+  
+  # Define the local file path for the zip file
+  zip_path <- file.path(save_dir, file_name)
+  
+  # Download the file with a timeout using httr::GET and write to a file
+  tryCatch({
+    response <- GET(zip_url, timeout(timeout_secs), write_disk(zip_path, overwrite = TRUE))
+    
+    if (response$status_code == 200) {
+      message("Downloaded: ", zip_url, " as ", file_name)
+    } else {
+      message("Failed to download: ", zip_url, " - Status code: ", response$status_code)
+    }
+  }, error = function(e) {
+    message("Error downloading: ", zip_url, " - ", e$message)
+  })
+  
+  return(zip_path)
+}
+
+# Create the directory if it does not exist
+if (!dir.exists(local_directory)) {
+  dir.create(local_directory, recursive = TRUE)
+}
+
+# Apply the function to each link and download the files with a timeout
+downloaded_files <- map(full_subsequent_links, ~ download_zip_file_with_timeout(.x, local_directory))
+
+```
+
+# Use 7-zip to extract all enrollment numbers by plan files - save to a directory called "enrollment".
+
+```{r}
+# Define the path to the folder containing the .csv files
+folder_path <- "C://Users//Nick//Desktop//VA//GENCO//enrollment"
+
+# List all .csv files in the folder and subfolders that start with either "Monthly_Report_By_Plan" or "monthly report by plan"
+all_csv_files <- list.files(folder_path, 
+                            pattern = "^(Monthly_Report_By_Plan|monthly report by plan).*\\.csv$", 
+                            full.names = TRUE, 
+                            recursive = TRUE)
+
+# Extract dates from the filenames in both YYYY_MM and Dec 2008_12082008 formats
+names_df <- data.frame(
+  name = basename(all_csv_files)
+) %>%
+  mutate(
+    # Extract date in the format YYYY_MM
+    date = case_when(
+      # Format YYYY_MM
+      str_detect(name, "\\d{4}_\\d{2}") ~ str_extract(name, "\\d{4}_\\d{2}"),
+      
+      # Format with month name and date like "Dec 2008_12082008"
+      str_detect(name, "\\w{3}\\s\\d{4}_\\d{8}") ~ str_extract(name, "\\d{8}"),
+      
+      # Default NA if no date is found
+      TRUE ~ NA_character_
+    ),
+    
+    # Convert extracted date to Date format (YYYY_MM is assumed to be the first day of the month)
+    date = case_when(
+      str_detect(date, "^\\d{4}_\\d{2}$") ~ ymd(paste0(date, "_01")),
+      str_detect(date, "^\\d{8}$") ~ ymd(date),  # Handle exact dates like 12082008
+      TRUE ~ NA_Date_
+    )
+  )
+
+# Function to process each .csv file based on the extracted date
+process_file <- function(file_path, date_var) {
+  # Print the name of the file being processed
+  cat("Processing file:", basename(file_path), "\n")
+  
+  # Read the .csv file with specified column names
+  data <- read_csv(file_path)
+  
+  # Convert all column names to lowercase for consistency
+  names(data) <- tolower(names(data))
+  
+  # Add the "date" column
+  data <- data %>%
+    mutate(date = date_var)
+  
+
+  
+  return(data)
+}
+
+# Process each file and combine the results into a single data frame
+all_data <- purrr::map2_dfr(all_csv_files, names_df$date, process_file)
+```
+
+```{r, Clean Enrollment Data}
+enrollment <- data.frame(contract_id = all_data$`contract number`,
+                         plan_id = all_data$`plan id`,
+                         enrollment = all_data$enrollment,
+                         date = as.Date(all_data$date))
+
+enrollment <- enrollment %>%
+  mutate(
+    date = case_when(
+      month(date) %in% 1:6 ~ as.Date(paste0(year(date), "-06-30")), # Summarize by first 6 months of year and
+      month(date) %in% 7:12 ~ as.Date(paste0(year(date), "-12-31")) # last 6 months of the year.
+    )
+  )
+
+
+#  (1) The privacy laws of HIPAA have been interpreted to prohibit publishing 
+#  enrollment data with values of 10 or less. Data rows with enrollment values
+#  of 10 or less have been removed from this file. The complete file that includes
+#  these removed rows but with blanked out enrollment data is also available for
+#  download. 
+
+enrollment$enrollment <- sapply(enrollment$enrollment, function(x) ifelse(x == "*", sample(1:10, 1), x))
+
+enrollment$enrollment <- as.numeric(enrollment$enrollment)
+
+```
+
+```{r}
+# Group by contract_num, plan_id, and the 6-month period, then summarize enrollment
+enrollment_total <- enrollment %>%
+  group_by(date) %>%
+  summarise(total_enrollment = mean(enrollment, na.rm = TRUE))
+
+enrollment_summary <- left_join(enrollment, enrollment_total, by = "date")
+
+enrollment_summary <- enrollment_summary %>% 
+ group_by(contract_id, plan_id, date) %>%
+ # average plan enrollment for the 6 month period divided by average  
+ summarise(enrollment_per_plan_per6mo = round(mean(enrollment, na.rm = TRUE), 1)/ total_enrollment)
+
+#enrollment_summary <- enrollment_summary %>% group_by(date) %>% mutate(total_enrollment_weight = round(scale(total_enrollment), 3))
+
+#enrollment_summary <- enrollment_summary %>% tidyr::drop_na()
+```
+
+```{r, Join Contract-Plan Crosswalk to Enrollment Data}
+combined_plan_data$date <- as.Date(combined_plan_data$date)
+enrollment_summary$plan_id <- as.factor(as.numeric(enrollment_summary$plan_id))
+enrollmentcw <- full_join(combined_plan_data, enrollment_summary, by = c("contract_id", "plan_id", "date"))
+
+enrollmentcw <- enrollmentcw %>% select(-X) %>% distinct()
+#enrollmentcw <- enrollmentcw %>% tidyr::drop_na(total_enrollment)
+
+```
+
+```{r, Remove leading 000 from the formulary_id from the enrollment data.}
+enrollmentcw$formulary_id <- sub("^000", "", enrollmentcw$formulary_id)
+```
+
+```{r, Load Formulary by App No. per period data}
+results <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//part2-data-10-30-2024.csv")
+#pd_final <- results
+```
+
+```{r, Correct Variable Types in Formulary Data}
+results$formulary_id <- as.character(results$formulary_id)
+results$date <- as.Date(results$date)
+
+results <- results %>% mutate(pauth_presence = if_else(prior_authorization_yn == "Y", 1, 0), 
+                              step_presence = if_else(step_therapy_yn == "Y", 1, 0),
+                              quant_presence = if_else(quantity_limit_yn == "Y", 1, 0)) %>% select(-prior_authorization_yn, -step_therapy_yn, -quantity_limit_yn, -step_presence, -quant_presence)
+
+```
+
+```{r, Load Drugs@FDA app number dataset}
+long_mol <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//long_mol10-30-2024.csv") # Downloaded from Drugs@FDA. Contact Ravi Gupta for data. 
+```
+
+```{r, Manipulate certain rows to get a unique ingredient - app_no combination}
+ingredients <- long_mol %>%
+  mutate(ingredient = ifelse(appl_no == "NDA214511", 
+                                     str_replace(ingredient, " ACETATE", ""), 
+                                     ingredient),
+         trade_name = ifelse(appl_no == "NDA218347", 
+                             str_replace(trade_name, " LQ", ""), 
+                             trade_name)) %>% select(ingredient, appl_no) %>% distinct()
+```
+
+# Select subset of ingredients
+
+```{r}
+sub <- long_mol %>% filter(ingredient == "ABIRATERONE ACETATE" | ingredient == "ALVIMOPAN" | ingredient == "IBRUTINIB") %>% select(appl_no) %>% distinct()
+```
+
+```{r, Limit to necessary data}
+
+ndc_level_e <- results %>% select(app_no, date, ndc, rxcui, pauth_presence, formulary_id) 
+
+```
+
+```{r}
+ndc_level_e_sum_check <- ndc_level_e %>% mutate(ndc = if_else(is.na(ndc), 9999999, ndc), ndcmissing = if_else(ndc == 9999999, 1, 0)) %>% group_by(ingredient, app_no, rxcui, ndcmissing) %>% 
+  dplyr::summarize(minDate = min(date, na.rm = T),
+          maxDate = max(date, na.rm = T),
+          sum_pauth = sum(pauth_presence, na.rm = T), 
+          pauth = if_else(sum_pauth > 1, 1, 0),
+          pauth_prop = mean(pauth_presence, na.rm = T))
+
+# Ok so the NA RXCUIs are perfect duplicates of those with NDCs.
+# Even if you didn't have the NDCs - you would get accurate count of formulary / prior auth information.
+
+```
+```{r}
+# Let's do a micro example: ABIRATERONE ACETATE
+ndc_level_e_sum_check <- ndc_level_e %>% mutate(ndc = if_else(is.na(ndc), 9999999, ndc), ndcmissing = if_else(ndc == 9999999, 1, 0)) %>% group_by(ingredient, app_no, rxcui, ndcmissing, date) %>% filter(ingredient == "ABIRATERONE ACETATE") %>% summarise(pauth_presence = if_else(sum(pauth_presence, na.rm = T) > 1, 1, 0)) %>% pivot_wider(names_from = date, values_from = pauth_presence)
+```
+
+```{r}
+# Perfectly cuts it in half
+ndc_level_e <- ndc_level_e %>% tidyr::drop_na(ndc)
+```
+
+
+```{r, Add Ingredient to NDC dataset}
+
+# After joining ingredient data to Part D data- only 46 out of the 106 generic ingredients in the original Drugs@FDA have Part D data.
+
+ndc_level_e <- left_join(ndc_level_e, ingredients, c("app_no" = "appl_no"))
+```
+
+
+
+```{r}
+library(data.tree)
+library(treemap)
+library(DiagrammeR)
+subset$pathString <- paste(subset$ingredient,
+                            subset$app_no,
+                            subset$rxcui,
+                            subset$ndc,
+                            #ndc_level_e$date,
+                            sep = "|")
+acme <- as.Node(subset)
+
+```
+
+```{r}
+
+subset <- ndc_level_e_ndc %>% filter(ingredient == "ABIRATERONE ACETATE")
+
+```
+```{r}
+subset <- subset %>% select(ingredient, app_no, rxcui, ndc, pathString) %>% distinct()
+vplot(as.dendrogram(acme))
+```
+```{r}
+useRtree <- as.Node(subset, pathDelimiter = "|")
+useRtreeList <- ToListExplicit(useRtree, unname = TRUE)
+radialNetwork( useRtreeList)
+```
+```{r}
+library(networkD3)
+acmeNetwork <- ToDataFrameNetwork(acme)
+simpleNetwork(acmeNetwork, fontSize = 8)
+```
+
+```{r}
+ndc_level_e_ndc <- left_join(ndc_level_e, enrollmentcw, by = c("formulary_id", "date"))
+```
+
+```{r}
+ndc_level_e_ndc$app_type <- ifelse(grepl("^NDA", ndc_level_e_ndc$app_no), "NDA", 
+                      ifelse(grepl("^ANDA", ndc_level_e_ndc$app_no), "ANDA", NA))
+
+# Remove 'NDA' or 'ANDA' from 'app_no'
+ndc_level_e_ndc$app_no <- gsub("^(NDA|ANDA)", "", ndc_level_e_ndc$app_no)
+```
+
+```{r}
+ndc_level_e_sum_check_f  <- ndc_level_e_ndc %>% group_by(ingredient, app_no, rxcui, ndc, date) %>% summarise(pauth_presence_plan = if_else(sum(pauth_presence, na.rm = T) > 1, 1, 0)) %>% pivot_wider(names_from = date, values_from = pauth_presence_plan)
+```
+  
+```{r}
+write.csv(ndc_level_e_ndc, "C://Users//Nick//Desktop//VA//GENCO-Misc//ndc_level_e_ndc.csv" )
+```
+
+
+# What happens when I drop formularies with no enrollment?
+# No plan information
+# No NDC
+```{r} 
+no_enrollment <- ndc_level_e_ndc %>% tidyr::drop_na(total_enrollment) # lost 120,000 obs.
+#no_plan <- no_enrollment %>% tidyr::drop_na(plan_id) # same 
+#no_ndc <- no_enrollment %>% tidyr::drop_na(ndc) # lost 1.18 million
+
+```
+
+
+
+```{r}
+read.csv()
+
+```
+
+```{r}
+writexl::write_xlsx(drug_appearance_stats_overall_g, "C://Users//Nick//Desktop//VA//GENCO-Misc//drug-appearance_stats_by_ingredient-10-31-2024.xlsx")
+```
+
+```{r}
+#full <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//ndc_level_e_ndc.csv")
+```
+
+
+```{r, Find First Appearance for Every Ingredient at Formulary Level}
+drug_appearance_stats <- full %>% distinct(ingredient, app_type, app_no, rxcui, ndc, formulary_id, date) %>% 
+  group_by(ingredient, app_type, app_no, rxcui, ndc) %>% 
+  arrange(date) %>% 
+  summarize(
+    total_formularies = n_distinct(formulary_id),
+    percentile_10_index = ceiling(0.10 * total_formularies),
+    percentile_50_index = ceiling(0.50 * total_formularies),
+    first_appearance = min(date),
+    date_10_percent = nth(date, percentile_10_index),
+    date_50_percent = nth(date, percentile_50_index),
+    date_100_percent = nth(date, total_formularies)
+    )
+```
+
+```{r}
+library(ggplot2)
+library(ggh4x)
+data = drug_appearance_stats %>% filter(ingredient == "ICATIBANT ACETATE" | ingredient == "PLERIXAFOR" | ingredient == "DALFAMPRIDINE" | ingredient == "SEMAGLUTIDE")
+
+p <- ggplot(data, aes(x = as.Date(date), y = interaction(as.factor(ndc), as.factor(app_no), as.factor(ingredient)))) +
+  geom_point(aes(x = as.Date(first_appearance), color = app_type)) +
+  geom_point(aes(x = as.Date(date_10_percent)), size = 2, shape = 49) +
+    geom_point(aes(x = as.Date(date_50_percent)), size = 2, shape = 53) +
+
+  geom_segment(aes(x = as.Date(first_appearance), xend = today()), alpha = 0.25, color = "black", size = 1) +
+  scale_y_discrete(guide = "axis_nested") +
+
+  labs(x = "Dates", y = "Ingredient, App No, NDC", title = "Drug Timeline Segments")
+
+ggsave("C://Users//Nick//Desktop//VA//GENCO-Misc//genco-timeline-11-19-2024.png", p, height = 20, width = 10)
+```
+
+```{r, Find First Appearance for Every Ingredient at Plan Level}
+drug_appearance_stats_plan <- full %>% distinct(ingredient, app_type, app_no, rxcui, ndc, plan_id, segment_id, date) %>% mutate(plan_seg = paste(plan_id, "-", segment_id)) %>% 
+  group_by(ingredient, app_type, app_no, rxcui, ndc) %>% 
+  arrange(date) %>% 
+  summarize(
+    total_plans = n_distinct(plan_seg),
+    percentile_10_index = ceiling(0.10 * total_plans),
+    percentile_50_index = ceiling(0.50 * total_plans),
+    first_appearance = min(date),
+    date_10_percent = nth(date, percentile_10_index),
+    date_50_percent = nth(date, percentile_50_index),
+    date_100_percent = nth(date, total_plans)
+    )
+```
+
+
+
+
+

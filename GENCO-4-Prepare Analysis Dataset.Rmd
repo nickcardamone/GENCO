@@ -1,0 +1,257 @@
+---
+title: "GENCO-4-Prepare Analysis Dataset"
+author: "Nicholas Cardamone"
+date: "10/3/2024"
+output: html_document
+---
+
+# Goals: Create analysis dataset with outcome (prior authorization) by period per application number / ingredient.
+
+# What this code does:
+1. Load relevant Drugs@FDA data and application-number level data from Part 3.
+2. Clean data
+3. Join ingredient data to application-number level Part D data from Part 3.
+4. Prepares a wide ingredient-level data-set.
+
+```{r, Load necessary packages and functions}
+library(lubridate)
+library(dplyr)
+library(tidyverse)
+library(rvest)
+library(purrr)
+# Function to collapse categorical variables by ;
+collapse_categorical <- function(x) {
+  if (is.factor(x) || is.character(x)) {
+    return(paste(unique(x), collapse = "; "))
+  } else {
+    result <- mean(as.numeric(x), na.rm = TRUE)  # Calculate mean for continuous data
+    if (is.nan(result)) {
+      return(NA)  # Replace NaN with NA
+    } else {
+      return(round(result, 3))  # Round to 3 decimal places
+    }
+  }
+}
+```
+
+```{r, Load Formulary by App No. per period data}
+long_mol <- read.csv("long_mol10-01-2024.csv")
+```
+
+```{r, Load App No. per period data}
+appno_level <- readxl::read_xlsx("part3_app_no_long_n=1943_10-17-2024.xlsx")
+#pd_final <- results
+```
+
+
+```{r, Collapse Drugs@FDA dataset}
+# Step 1: Remove "acetate" from 'long_mol_condensed' for 'appl_no' "NDA214511"
+# Step 2: Remove "LQ" from 'trade_name' for 'appl_no' "NDA218347"
+long_mol <- long_mol %>%
+  mutate(ingredient = ifelse(appl_no == "NDA214511", 
+                                     str_replace(ingredient, " ACETATE", ""), 
+                                     ingredient),
+         trade_name = ifelse(appl_no == "NDA218347", 
+                             str_replace(trade_name, " LQ", ""), 
+                             trade_name))
+```
+
+```{r, Clean Drugs@FDA (i.e. molecule) dataset}
+long_mol_condensed <- long_mol %>%
+  mutate(
+    productmktstatus = as.factor(doc_type1),
+    doc_type = as.factor(doc_type1),
+    mechanism = gsub(";", ",", df_new),
+    approval_date = as.factor(approval_date1),
+    appl_type = as.factor(appl_type),
+    reviewpriority = as.factor(reviewpriority1)) %>% 
+  select(-approval_year, -approval_date1, -doc_type1, -df_new, -reviewpriority1) %>% 
+  group_by(appl_no, appl_type, ingredient, trade_name, productmktstatus, applicant, combination_totalnumber, generics_presence, doc_type, approval_date, reviewpriority) %>% summarize(mechanism = collapse_categorical(mechanism))
+
+```
+```{r, Turn formulation labels into indicator variables.}
+# Define the keywords for each administration type
+keywords <- c("SOLUTION", "LOTION", "TABLET", "CAPSULE", "PELLETS", "GRANULES", 
+              "SUSPENSION", "POWDER", 
+              "IMPLANT", "INHALATION", "INTRAVENOUS", "SUBCUTANEOUS", "FILM",
+              "TOPICAL", "ORAL", "OPHTHALMIC", "INTRAMUSCULAR", "INTRAVITREAL", "TRANSDERMAL", 
+              "INTRATHECAL", "INJECTION", "OTIC", "INHALATION", "CHEWABLE", "PATCH", "DELAYED RELEASE", "EXTENDED RELEASE")
+
+# Use string_detect to create indicator columns for each keyword
+for (keyword in keywords) {
+  long_mol_condensed[[paste0("form_", keyword)]] <- as.integer(str_detect(long_mol_condensed$mechanism, keyword))
+}
+```
+
+
+```{r, Join Drugs@FDA data onto Part D data}
+# Because we're joining to the PD data, we're going to lose all of the rows the molecule data that Do Not appear in the PD data. Which is fine because ultimately we're concerned with only drugs that appear in Medicare Part D.
+appno_level_long <-left_join(appno_level, long_mol_condensed, by = c("app_no" = "appl_no"))
+
+# Drop unecessary or renamed columns
+appno_level_long <- appno_level_long %>% mutate(generic = if_else(str_detect(app_no, "ANDA"), 1, 0)) %>%
+  select(
+    date,
+    ingredient,
+    app_no,
+    appl_type,
+    doc_type,
+    productmktstatus,
+    reviewpriority,
+    trade_name,
+    mechanism,
+    applicant,
+    combination_totalnumber,
+    generics_presence,
+    generic,
+    approval_date,
+  #  starts_with("form_"),
+    starts_with("pauth"),
+    starts_with("step"),
+    starts_with("total_en")
+  )
+
+
+```
+
+
+```{r, Long App No. Level Data}
+writexl::write_xlsx(appno_level_long, "part4_appno_LONG_n=1943_10-17-2024.xlsx")
+```
+
+# Create application number level data in wide format:
+
+```{r, Pivot out date data to wide, extract date of first appearance in Part D data }
+
+appno_level_wide <- appno_level %>% arrange(date) %>% select(-pauth_prop, -step_prop, -ql_prop) %>% 
+  pivot_wider(
+    names_from = date,
+    values_from = c(pauth_presence, step_presence, total_enrollment, total_enrollment_weight),
+    names_sep = "_"
+  )
+```
+
+```{r, Make dataset wide.}
+# Assuming your dataframe is called 'df'
+# Subset the dataframe to only include columns that start with "pauth_presence"
+subset_df <- appno_level_wide[, grepl("pauth_presence", names(appno_level_wide))]
+
+# Apply the function to find the first non-NA value in these columns only
+appno_level_wide$first_pd_date <- apply(subset_df, 1, function(row) {
+  # Get the first non-NA index
+  first_pd_date <- which(!is.na(row))[1]
+  
+  # If no non-NA values are found, return NA, otherwise return the column name
+  if (is.na(first_pd_date)) {
+    return(NA)
+  } else {
+    return(names(subset_df)[first_pd_date])
+  }
+})
+
+# Join original ingredient data extracted from Drugs@FDA.
+# long_mol (see GENCO-1)
+appno_level_wide <-left_join(long_mol_condensed, appno_level_wide, by = c("appl_no" = "app_no"))
+
+# Ensure the columns are properly formatted.
+appno_level_wide <- appno_level_wide %>%
+  mutate(
+    first_pd_date = as.Date(gsub("pauth_presence_", "", first_pd_date), format = "%Y-%m-%d"),
+    first_generic_pd = as.Date(if_else(startsWith(appl_no, "A"), first_pd_date, NA), format = "%Y-%m-%d"),
+    first_branded_pd = as.Date(if_else(startsWith(appl_no, "N"), first_pd_date, NA), format = "%Y-%m-%d")
+  )
+
+# Drop unecessary or renamed columns
+appno_level_wide <- appno_level_wide %>%
+  select(
+    ingredient,
+    appl_no,
+    appl_type,
+    doc_type,
+    productmktstatus,
+    reviewpriority,
+    trade_name,
+    mechanism,
+    applicant,
+    combination_totalnumber,
+    generics_presence,
+    approval_date,
+    first_pd_date,
+    first_branded_pd,
+    first_generic_pd,
+  #  starts_with("form_"),  #formulation data not necessary.
+    starts_with("pauth"),
+    starts_with("step"),
+    starts_with("total_enroll")
+  )
+
+```
+```{r, Wide Data}
+writexl::write_xlsx(appno_level_wide, "part4_app_no_n=683_10-18-2024.xlsx")
+```
+
+
+# Create ingredient-level data:
+
+```{r, Aggregate data at ingredient level}
+# Apply group_by and summarise using across for all columns (separate character or factor columns by semi-colon, take first date, calcualte total periods that the ingredient appears in the Part D files.)
+ingredient_level <- appno_level_wide %>%
+  group_by(ingredient) %>%
+  summarise(
+    total_periods = sum(across(starts_with("20"), ~ sum(!is.na(.)))),
+    across(starts_with("form"), ~ max(.x, na.rm = TRUE)),
+    across(everything(), collapse_categorical),
+            first_pd_date =  if (all(is.na(first_pd_date))) NA else as.Date(min(first_pd_date, na.rm = TRUE), format = "%Y-%m-%d"),
+            first_branded_pd = if (all(is.na(first_branded_pd))) NA else as.Date(min(first_branded_pd, na.rm = TRUE), format = "%Y-%m-%d"),
+            first_generic_pd = if (all(is.na(first_generic_pd))) NA else as.Date(min(first_generic_pd, na.rm = TRUE), format = "%Y-%m-%d"),
+    
+  )
+
+# Drop unecessary or renamed columns
+ingredient_level <- ingredient_level %>%
+  select(
+    ingredient,
+    appl_no,
+    appl_type,
+    doc_type,
+    productmktstatus,
+    reviewpriority,
+    trade_name,
+    mechanism,
+    applicant,
+    combination_totalnumber,
+    generics_presence,
+    approval_date,
+    first_pd_date,
+    first_branded_pd,
+    first_generic_pd,
+   # starts_with("form_"), #formulation data not necessary.
+    starts_with("pauth"),
+    starts_with("step"),
+    starts_with("total_enroll"),
+    total_periods
+  )
+
+```
+
+
+```{r, Separate columns by semi-colon delimeter}
+ingredient_level_sep <- ingredient_level
+
+for(col in colnames(ingredient_level_sep)) {
+  if (!grepl("^20", col) & col != "ingredient" & col != "total_periods" & col != "first_pd_date"  & col != "first_branded_pd" & col != "first_generic_pd" & col != "combination_totalnumber" & col != "generics_presence") {
+    ingredient_level_sep <- ingredient_level_sep %>%
+      separate(col, into = paste0(col, "_", 1:3), sep = ";", remove = TRUE)
+  }
+}
+# Drop empty columns.
+ingredient_level_sep <- ingredient_level_sep %>%
+  select_if(~ !all(is.na(.)))
+
+```
+
+```{r, Save to CSV}
+writexl::write_xlsx(ingredient_level_sep, "part4_ingredient_n=473_10-19-2024.xlsx")
+```
+
+

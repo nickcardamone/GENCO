@@ -1,0 +1,106 @@
+---
+title: "GENCO-5-Analysis"
+author: "Nicholas Cardamone"
+date: "10/4/2024"
+output: html_document
+---
+
+## Goal:
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(lme4)
+library(dplyr)
+library(ggplot2)
+library(dplyr)
+library(sjPlot) # For plotting mixed effects model predictions
+library(ggeffects)  # For ggpredict function
+```
+
+```{r setup, include=FALSE}
+vizdat <- readxl::read_xlsx("part3_app_no_LONG_n=5859_10-4-2024.xlsx")
+```
+
+```{r}
+# Assuming df_long is the dataframe
+# Convert pauth_presence to a factor if it's binary (0 or 1)
+model <- lmer(pauth_prop ~ generics_presence + (1 | ingredient/app_no) + date,
+               data = vizdat)
+
+# Summary of the model
+summary(model)
+```
+```{r}
+generic_intro_dates <- vizdat %>%
+  filter(generics_presence == 1) %>%
+  group_by(ingredient) %>%
+  summarise(generic_intro_date = min(date, na.rm = TRUE))
+
+# Step 2: Merge the introduction date back into the main data
+vizdat <- vizdat %>%
+  left_join(generic_intro_dates, by = "ingredient")
+
+# Step 3: Create a new variable 'time_since_generic' representing the time (in days) since the generic was introduced
+vizdat <- vizdat %>%
+  mutate(time_since_generic = as.numeric(difftime(date, generic_intro_date, units = "days")),
+         time_since_generic = ifelse(is.na(time_since_generic), 0, time_since_generic))  # Handle cases with no generic
+
+# Step 4: Build a mixed-effects model with 'time_since_generic' as the main predictor
+model <- glmer(pauth_presence ~ time_since_generic + (1 | ingredient/app_no),
+               data = vizdat,
+               family = binomial(link = "logit"))
+
+# Summary of the model
+summary(model)
+
+# Step 5: Plot the relationship between time since generic introduction and pauth_prop
+ggplot(vizdat, aes(x = time_since_generic, y = pauth_prop, color = factor(generics_presence))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(title = "Effect of Time Since Generic Introduction on Prior Authorization Proportion",
+       x = "Time Since Generic Introduction (Days)",
+       y = "Prior Authorization Proportion",
+       color = "Generic Presence") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+```{r}
+# Step 1: Convert 'approval_date' to Date type if necessary
+vizdat <- vizdat %>%
+  mutate(approval_date = ymd(approval_date),
+         date = ymd(date))
+
+# Step 2: Create a new variable 'days_since_approval' representing the time (in days) since the drug was approved
+vizdat <- vizdat %>%
+  mutate(days_since_approval = as.numeric(difftime(date, approval_date, units = "days")))
+
+# Step 3: Build a mixed-effects model using 'days_since_approval' as the main predictor
+model <- glmer(pauth_presence ~ days_since_approval + (1 | ingredient/app_no) + generic,
+               data = vizdat,
+               family = binomial(link = "logit"))
+
+# Summary of the model
+summary(model)
+```
+```{r}
+# Step 4: Plot the relationship between days since approval and pauth_prop
+ggplot(vizdat, aes(x = days_since_approval, y = pauth_prop, color = factor(generic))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(title = "Effect of Days Since Approval on Prior Authorization Proportion",
+       x = "Days Since Approval",
+       y = "Prior Authorization Proportion",
+       color = "Generic Presence") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+
+
+
