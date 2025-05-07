@@ -11,116 +11,375 @@ output: html_document
 # What this code does:
 1. Loads the molecule data and extracts lists of NDA and ANDAs from each.
 2. After the interim step of going to RxMix to extract the RXCUI and NDCs associated with each NDA and ANDA in our list, we load the lists, and create clean crosswalk files of NDA and ANDA to RXCUI and NDC.
-3. Attempt a join of NDA or ANDA to NDC and RXCUI. Bind together all four lists. Take unique rows. This is our list of relevant Part D data, filtered by the NDC and RXCUI that are associated with the NDA and ANDAs of the target ingredients.
-4. Output is relevant Medicare Part D data 2006-2023.
+3. Attempt a join of NDA or ANDA to NDC and RXCUI. Bind together all four lists and filter to unique rows. This is our list of relevant NDCs and RXCUI from the Prior Authorization data, filtered by the NDC and RXCUI that are associated with the NDA and ANDAs of the target molecules.
+4. Output is relevant Medicare Part D Prior Authorization data 2006-2023.
 
-# Note: Joining is chunked to reduce memory burden on computer. 
+# Note: Joining process is chunked to reduce memory burden on computer. 
 
+
+# https://www.accessdata.fda.gov/scripts/cder/daf/index.cfm
+# https://dailymed.nlm.nih.gov/dailymed/advanced-search.cfm
 
 ```{r, Load necessary packages}
-library(tidyverse)
-library(dplyr)
+library(tidyverse) #data manipulation and viz
+library(dplyr) # data manipulation
 library(pbapply)  # For progress bar
-library(haven)
+library(haven) # webscraping
+library(rvest) # webscraping
+library(httr) # webscraping 
+library(purrr) # helper for working with big data
+library(stringr) # character manipulation
+library(xml2) # reading/prcocessing xml files
+library(readr) # reading/processing different file types
+library(zip) # reading/processing zip files
+library(polite) # enhancing webscraping effectiveness
+library(ggh4x) # nested axes in ggplot
 ```
 
-```{r, Load Molecule Data n=698}
-long_mol <- read_dta("C://Users//Nick//Desktop//VA//GENCO//extra file//molecules_10.1.24_long.dta") # Downloaded from Drugs@FDA. Contact Ravi Gupta for data. 
+```{r, Load Molecule Data n=1192}
+long_mol <- read.csv("C://Users//Nick//Documents//GENCO//part2//long_mol10-30-2024.csv")
+#Downloaded from Drugs@FDA. Contact Ravi Gupta for data. 
+
+setwd("C://Users//Nick//Documents//GENCO//part2//")
 
 # String pad application number and add the appropriate prefix depending if it is a branded drug (NDA) or generic drug (ANDA).
-NDA_mol = long_mol %>% filter(appl_type == 1) %>% mutate(appl_no = paste0("NDA", str_pad(appl_no, 6, pad = "0")))
-ANDA_mol = long_mol %>% filter(appl_type == 2) %>% mutate(appl_no = paste0("ANDA", str_pad(appl_no, 6, pad = "0")))
+#NDA_mol = long_mol %>% filter(appl_type == 1) %>% mutate(appl_no = paste0("NDA", str_pad(appl_no, 6, pad = "0")))
+#ANDA_mol = long_mol %>% filter(appl_type == 2) %>% mutate(appl_no = paste0("ANDA", str_pad(appl_no, 6, pad = "0")))
 
-long_mol <- bind_rows(NDA_mol, ANDA_mol) # Overwrite long_mol with the new appl_no variable because it matches format of appl_no we'll see later.
+#long_mol <- bind_rows(NDA_mol, ANDA_mol) # Overwrite long_mol with the new appl_no variable because it matches format of appl_no we'll see later.
 
 # Create NDA and ANDA lsits.
-write.csv(NDA_mol, "ndalist10-01-2024.csv")
-write.csv(ANDA_mol, "andalist10-01-2024.csv")
-write.csv(long_mol, "long_mol10-01-2024.csv")
+#write.csv(NDA_mol, "ndalist10-30-2024.csv")
+#write.csv(ANDA_mol, "andalist10-30-2024.csv")
+#write.csv(long_mol, "long_mol10-30-2024.csv")
 
 ```
 
 Interim step:
 1. Go to https://mor.nlm.nih.gov/RxMix/
-2. Load NDA lists on File (one id per line)
-3. Select Function > findRxcuiById > Add > Scope of search: Current concepts & Type of identifier: NDA.
-4. Select Add another function > getAllHistoricalNDCs > Depth: NDCs ever (in)directly associated.
+2. Select Function > findRxcuiById > Add > Scope of search: Current concepts & Type of identifier: NDA.
+3. Load NDA lists on File (one id per line)
+4. Select Add another function > getAllHistoricalNDCs > Depth: NDCs ever directly associated.
 5. Run & download
 6. Repeat steps 1-5 for ANDA list (change type of identifier to ANDA).
 
-
-```{r, Load lists of RXCUI and NDCs associated with NDA, ANDA}
-rxmixNDA <- read.delim("C://Users//Nick//Downloads//table(14).txt", header = T, sep = "\t", dec = ".")
-rxmixANDA<- read.delim("C://Users//Nick//Downloads//table(15).txt", header = T, sep = "\t", dec = ".")
+```{r}
+download_zip_from_setid("NDA209637", "SEMAGLUTIDE")
 ```
 
-```{r, Read in full Medicare Part D dataset}
-combined_data <- read.csv("C://Users//Nick//Documents//part1-full_data.csv")
-```
+```{r}
 
-```{r, String Pad NDCs}
-combined_data$ndc <- str_pad(combined_data$ndc, 11, pad = "0")
-```
+# Define the molecules of interest
+#test <- long_mol %>% filter(ingredient %in% c("ABIRATERONE ACETATE", "SEMAGLUTIDE", "TAVABOROLE", "IBRUTINIB", "DIMETHYL FUMARATE"))
 
-```{r,  Create lists of RXCUI associated with NDA}
-NDA_mol <- NDA_mol %>% select(appl_no, ingredient)
-list_nda <- right_join(NDA_mol, rxmixNDA, c("appl_no"= "id")) # All this does is make sure list of ANDAs is in the list of NDAs we have at the beginning.
-list_nda_ndc <- data.frame(app_no = list_nda$appl_no, ndc  = list_nda$F2_ndc) # pull out NDCs only
-list_nda_ndc$ndc <- str_pad(list_nda_ndc$ndc, 11, pad = "0") # string pad ndcs
-list_nda_rxcui <- data.frame(app_no = list_nda$appl_no, rxcui  = list_nda$F2_rxcui) %>% distinct() # pull out list of RXCUIs only
+# Extract application numbers
+application_numbers <- long_mol %>% distinct(appl_no, ingredient)
 
-ANDA_mol <- ANDA_mol %>% select(appl_no, ingredient)
-list_anda <- right_join(ANDA_mol, rxmixANDA, c("appl_no"= "id")) # All this does is make sure list of ANDAs is in the list of ANDAs we have at the beginning.
-list_anda_ndc <- data.frame(app_no = list_anda$appl_no, ndc  = list_anda$F2_ndc) # pull out NDCs only
-list_anda_ndc$ndc <- str_pad(list_anda_ndc$ndc, 11, pad = "0") # string pad ndcs
-list_anda_rxcui <- data.frame(app_no = list_anda$appl_no, rxcui  = list_anda$F2_rxcui) %>% distinct() # pull out list of RXCUIs only
+# List of rotating user-agents
+user_agents <- c(
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.5481.100 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.5359.124 Safari/537.36"
+)
 
-```
+# Base URL for searching by application number
+base_url <- "https://dailymed.nlm.nih.gov/dailymed/search.cfm?query=%s"
 
-```{r, Extract distinct list of NDA or ANDA to RXCUI pairings from full data}
-#subtest_ndc <- full_data #%>% group_by(formulary_id) %>% slice_sample(n=10)
-subset_rxcui <- combined_data %>% select(-ndc) %>% distinct() %>% drop_na(rxcui)
-```
+# Create directory for downloads if it doesn't exist
+if (!dir.exists("downloads")) dir.create("downloads")
 
-```{r, Join NDA and ANDA to Part D data via NDC and RXCUI}
-# Define chunk size
-chunk_size <- 100000  # Adjust the chunk size as needed
-
-# Function to process chunks with a merge operation
-process_chunk <- function(chunk, list_data, by_col) {
-  result <- merge(chunk, list_data, by = by_col, all.x = TRUE)
-  result <- result %>% drop_na(app_no) #%>% select(date, formulary_id, app_no)
-  return(result)
-}
-
-# Function to apply chunk processing with progress bar
-apply_chunks <- function(full_data, list_data, by_col, chunk_size) {
-  n <- nrow(full_data)
-  indices <- seq(1, n, by = chunk_size)
+# Function to extract ZIP files or follow drug-info links
+download_zip_from_setid <- function(app_no, ingredient) {
+  full_url <- sprintf(base_url, app_no)
+  message("Checking application page: ", full_url)
   
-  results_list <- pblapply(indices, function(i) {
-    chunk <- full_data[i:min(i + chunk_size - 1, n), ]
-    process_chunk(chunk, list_data, by_col)
+  tryCatch({
+    user_agent <- sample(user_agents, 1)
+
+    # Set headers
+    headers <- add_headers(
+      `User-Agent` = user_agent,
+      `Referer` = "https://dailymed.nlm.nih.gov/dailymed/"
+    )
+
+    page <- RETRY("GET", full_url, headers, timeout(30), times = 5, pause_min = 2, pause_base = 2)
+
+    html_page <- read_html(page)
+    
+    # Extract all links on the page
+    links <- html_page %>%
+      html_nodes("a") %>%
+      html_attr("href") %>%
+      unique()
+
+    # Extract direct ZIP file links
+    zip_links <- links[str_detect(links, "type=zip")] %>% na.omit()
+    
+    if (length(zip_links) > 0) {
+      zip_url <- url_absolute(zip_links[1], "https://dailymed.nlm.nih.gov")
+      message("Downloading ZIP: ", zip_url)
+
+      setid_value <- str_extract(zip_url, "setid=([a-zA-Z0-9-]+)") %>% str_replace("setid=", "")
+      zip_filename <- paste0("downloads/", setid_value, ".zip")
+
+      download.file(zip_url, zip_filename, mode = "wb")
+
+      Sys.sleep(runif(1, 1, 5))
+
+      return(data.frame(
+        application_number = app_no,
+        ingredient = ingredient,
+        status = "Success",
+        file_name = zip_filename,
+        url = zip_url
+      ))
+    } else {
+      message("No ZIP file found. Searching for 'drug-info-link' pages...")
+
+      # Extract links that match the pattern "/dailymed/drugInfo.cfm?setid="
+      drug_info_links <- html_page %>%
+        html_nodes("a.drug-info-link") %>%
+        html_attr("href") %>%
+        unique()
+      
+      # Convert relative URLs to absolute URLs
+      drug_info_links <- paste0("https://dailymed.nlm.nih.gov", drug_info_links)
+      
+      if (length(drug_info_links) > 0) {
+        message("Found secondary drug-info pages, checking each for ZIP files.")
+
+        secondary_results <- map_dfr(drug_info_links, function(drug_info_url) {
+          tryCatch({
+            sec_page <- RETRY("GET", drug_info_url, headers, timeout(30), times = 5, pause_min = 2, pause_base = 2)
+            sec_html <- read_html(sec_page)
+            
+            sec_links <- sec_html %>%
+              html_nodes("a") %>%
+              html_attr("href") %>%
+              unique()
+            
+            sec_zip_links <- sec_links[str_detect(sec_links, "type=zip")] %>% na.omit()
+
+            if (length(sec_zip_links) > 0) {
+              sec_zip_url <- url_absolute(sec_zip_links[1], "https://dailymed.nlm.nih.gov")
+              message("Downloading ZIP from secondary link: ", sec_zip_url)
+
+              setid_value <- str_extract(sec_zip_url, "setid=([a-zA-Z0-9-]+)") %>% str_replace("setid=", "")
+              sec_zip_filename <- paste0("downloads/", setid_value, ".zip")
+
+              download.file(sec_zip_url, sec_zip_filename, mode = "wb")
+
+              return(data.frame(
+                application_number = app_no,
+                ingredient = ingredient,
+                status = "Success (Secondary Link)",
+                file_name = sec_zip_filename,
+                url = sec_zip_url
+              ))
+            } else {
+              return(data.frame(
+                application_number = app_no,
+                ingredient = ingredient,
+                status = "No ZIP found in secondary links",
+                file_name = NA,
+                url = drug_info_url
+              ))
+            }
+          }, error = function(e) {
+            message("Error processing secondary page ", drug_info_url, ": ", e$message)
+            return(data.frame(
+              application_number = app_no,
+              ingredient = ingredient,
+              status = paste("Error in secondary link:", e$message),
+              file_name = NA,
+              url = drug_info_url
+            ))
+          })
+        })
+
+        return(secondary_results)
+      } else {
+        return(data.frame(
+          application_number = app_no,
+          ingredient = ingredient,
+          status = "No ZIP or secondary links found",
+          file_name = NA,
+          url = full_url
+        ))
+      }
+    }
+  }, error = function(e) {
+    message("Error processing application page ", full_url, ": ", e$message)
+    return(data.frame(
+      application_number = app_no,
+      ingredient = ingredient,
+      status = paste("Error:", e$message),
+      file_name = NA,
+      url = full_url
+    ))
   })
-  
-  results <- bind_rows(results_list)
-  return(results)
 }
 
-# Process each merge operation in chunks with a progress bar
-result1 <- apply_chunks(combined_data, list_nda_ndc, "ndc", chunk_size)
-result2 <- apply_chunks(subset_rxcui, list_nda_rxcui, "rxcui", chunk_size)
-result3 <- apply_chunks(combined_data, list_anda_ndc, "ndc", chunk_size)
-result4 <- apply_chunks(subset_rxcui, list_anda_rxcui, "rxcui", chunk_size)
+# Run the function for each application number and molecule
+metadata_table <- application_numbers %>%
+  pmap_dfr(~ download_zip_from_setid(..1, ..2))
 
-# Combine the results and remove duplicates
-results <- bind_rows(result1, result2, result3, result4) %>% distinct()
 ```
+
+```{r}
+# Define the directory containing ZIP files
+zip_dir <- "C://Users//Nick//Documents//GENCO//downloads"
+
+# Define the directory where files will be extracted
+extract_dir <- "C://Users//Nick//Documents//GENCO//part2//extracted"
+
+# Create the extraction directory if it doesn't exist
+if (!dir.exists(extract_dir)) {
+  dir.create(extract_dir, recursive = TRUE)
+}
+
+# List all ZIP files in the directory
+zip_files <- list.files(zip_dir, pattern = "\\.zip$", full.names = TRUE)
+
+# Extract each ZIP file to the extraction directory
+for (zip_file in zip_files) {
+  unzip(zip_file, exdir = extract_dir)
+}
+```
+
+```{r}
+# List all XML files in the extracted directories
+xml_files <- list.files(extract_dir, pattern = "\\.xml$", full.names = TRUE, recursive = TRUE)
+
+```
+```{r}
+# Function to extract drug info, NDC codes, and application numbers from XML
+extract_drug_info <- function(file) {
+  xml_doc <- read_xml(file)
+  
+  # Define namespace (ensuring v3 prefix is defined for HL7 standard)
+  ns <- xml_ns(xml_doc)
+  ns <- c(ns, v3 = "urn:hl7-org:v3") 
+
+  # Extract drug name
+  drug_names <- xml_text(xml_find_all(xml_doc, ".//v3:manufacturedProduct/v3:name", ns))
+  
+  # Extract NDC codes from manufacturedProduct and containerPackagedProduct
+  ndc_codes <- xml_attr(xml_find_all(xml_doc, ".//v3:manufacturedProduct/v3:code | .//v3:containerPackagedProduct/v3:code", ns), "code")
+  
+  # Extract ANDA/NDA application numbers
+  appl_numbers <- xml_attr(xml_find_all(xml_doc, ".//v3:approval/v3:id", ns), "extension")
+
+  # Filter to include only ANDA or NDA numbers
+  appl_numbers <- appl_numbers[grepl("^ANDA|^NDA", appl_numbers)]
+  
+  # Handle missing data
+  max_length <- max(length(drug_names), length(ndc_codes), length(appl_numbers))
+  if (length(drug_names) == 0) drug_names <- rep(NA, max_length)
+  if (length(ndc_codes) == 0) ndc_codes <- rep(NA, max_length)
+  if (length(appl_numbers) == 0) appl_numbers <- rep(NA, max_length)
+
+  # Ensure all vectors are of the same length
+  drug_names <- rep_len(drug_names, max_length)
+  ndc_codes <- rep_len(ndc_codes, max_length)
+  appl_numbers <- rep_len(appl_numbers, max_length)
+
+  # Store extracted data in a dataframe
+  data.frame(
+    file = rep(file, max_length), 
+    drug_name = drug_names, 
+    ndc_code = ndc_codes, 
+    appl_no = appl_numbers, 
+    stringsAsFactors = FALSE
+  )
+}
+
+# Apply function to extract data from all XML files
+drug_data_list <- map(xml_files, extract_drug_info)
+
+# Combine into a single dataframe
+combined_drug_data <- bind_rows(drug_data_list)
+
+
+```
+
+
+
+
+```{r}
+#combined_drug_data$ndc <- as.numeric(gsub("-", "", combined_drug_data$ndc_code))
+#combined_drug_data$ndc <- str_pad(combined_drug_data$ndc, 11, pad = "0")
+
+combined_drug_uniq <- combined_drug_data %>% distinct(appl_no, ndc_code) %>% 
+  separate(ndc_code, into = c("seg1", "seg2", "seg3"), sep = "-") %>% 
+  mutate(ndc_code = str_c(seg1, seg2, seg3, sep = "-"), 
+         seg1p = str_pad(seg1, 5, pad = "0"), 
+         seg2p = str_pad(seg2, 4, pad = "0"), 
+         seg3p = str_pad(seg3, 2, pad = "0"), 
+         ndc9 = str_c(seg1p, seg2p, sep="-"), 
+         ndc11 = as.character(str_c(seg1p, seg2p, seg3p))) %>% distinct() %>% drop_na(ndc11)
+
+```
+```{r}
+library(data.table)
+combined_data<- fread("C://Users//Nick//Documents//GENCO//part1//output//part1-full_data-2-11-2025.csv", colClasses = list(character = c("ndc11", "formulary_id")), drop = "rxcui")
+
+```
+```{r, Read in full Medicare Part D dataset}
+combined_data <- read.csv("C://Users//Nick//Documents//GENCO//part1//output//part1-full_data-2-11-2025.csv", colClasses = c(ndc11 = "character", formulary_id = "character", rxcui = "character"))
+```
+
+```{r}
+#combined_data$ndc11_s <- as.character(combined_data$ndc11)
+#combined_data %>% head()
+apaxi <- combined_data %>% filter(str_starts(ndc11, "0")) %>% head()
+```
+
+```{r}
+chk <- inner_join(combined_data, combined_drug_uniq, by = "ndc11")
+```
+```{r}
+chk <- chk %>% distinct(date, formulary_id, appl_no, ndc11, ndc_code, prior_authorization_yn)
+```
+
+
+
+```{r}
+long_mol <- long_mol %>% distinct(appl_no, approval_date1, ingredient, trade_name, generics_presence)
+chk1 <- chk %>% left_join(long_mol, by = "appl_no")
+```
+
+```{r}
+chk1 <- chk1 %>% mutate(bad = if_else(as.Date(approval_date1)>as.Date(date), 1, 0)) %>% filter(bad == 0)
+
+```
+
+```{r, Visualize Availability of Prior-Auth-Free Versions at Ingredient level}
+chk1 %>% distinct(date, approval_date1, ingredient, formulary_id, prior_authorization_yn, generics_presence) %>% filter(ingredient %in% c("ABIRATERONE ACETATE", "SEMAGLUTIDE", "TAVABOROLE", "IBRUTINIB", "DIMETHYL FUMARATE")) %>% group_by(date, approval_date1, ingredient) %>% 
+  summarise(num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),
+    prop_pauth_free = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA)) %>% ggplot(aes(x=as.Date(date), y = reorder(ingredient, as.Date(approval_date1)), alpha = prop_pauth_free)) + geom_point(aes(x=as.Date(approval_date1), y = reorder(ingredient, as.Date(approval_date1))), color = "red3") + geom_tile(fill = "blue1") + labs(y="Ingredient", x= "Date") + scale_x_date() +theme_minimal()
+
+```
+
+```{r, Visualize Availability of Prior-Auth-Free Versions at Ingredient level}
+chk1 %>% distinct(date, approval_date1, ingredient, formulary_id, prior_authorization_yn, generics_presence, appl_no, ndc11) %>% filter(ingredient %in% c("DESVENLAFAXINE SUCCINATE", "VILAZODONE HYDROCHLORIDE", "TOLVAPTAN", "TICAGRELOR
+", "TERIFLUNOMIDE")) %>% group_by(date, approval_date1, ingredient, appl_no, ndc11) %>% 
+  summarise(num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),
+    prop_pauth_free = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA)) %>% ggplot(aes(x=as.Date(date), y = interaction(ndc11, appl_no, ingredient), alpha = prop_pauth_free)) + geom_point(aes(x=as.Date(approval_date1), y = interaction(ndc11, appl_no, ingredient)), color = "red3") + scale_y_discrete(guide = "axis_nested") + geom_tile(fill = "blue1") + labs(y="Ingredient", x= "Date") + scale_x_date()
+
+```
+
+
+
 
 
 ```{r, Write results to csv}
 # The final results data frame is now ready - this is a large file.
-write.csv(results, "part2-data-10-01-2024.csv")
+
+chk1 <- chk1 %>% distinct()
+write.csv(chk1, "part2-data-3-12-2025.csv")
 
 ```
 

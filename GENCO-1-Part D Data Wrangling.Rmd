@@ -29,6 +29,10 @@ library(httr)
 library(stringr)
 library(lubridate)
 library(haven)
+library(dplyr)
+library(tidyverse)
+library(xfun)
+library(data.table)
 
 ```
 
@@ -100,12 +104,11 @@ lapply(x$matches, download_function)
 
 # Note: Some files' names needed to be edited slightly.
 # I downloaded and uploaded the 2006-06 data manually because it was different dataframe than the others.
-```
-
+```  
 
 ```{r, Part D data upload}
 # Define the path to the folder containing the .dta, .txt, and .zip files
-folder_path <- "C://Users//Nick//Desktop//VA//GENCO"
+folder_path <- "C://Users//Nick//Documents//GENCO//part1//formulary_data//"
 
 # List all .dta, .txt, and .zip files in the folder that end with "with drug names"
 all_files <- list.files(folder_path, pattern = ".(dta|txt|zip)$", full.names = TRUE)
@@ -182,78 +185,541 @@ process_file <- function(file_path, date_var) {
     data$drugname <- NA
   }
   
-  # Ensure consistent data types
-  data <- data %>%
-    mutate(
-      formulary_id = as.character(formulary_id),
-      rxcui = as.character(rxcui),
-      ndc = as.character(ndc), # national drug code
-      prior_authorization_yn = as.character(prior_authorization_yn),
-      step_therapy_yn = as.character(step_therapy_yn),
-      quantity_limit_yn = as.character(quantity_limit_yn)
-    )
-  
-  # Convert the date string to Date type
-  date_var <- as.Date(date_var, format = "%Y%m%d")
-  
-  # Select the required columns and add the "date" column
-  data_selected <- data %>%
-    select(formulary_id, rxcui, ndc, prior_authorization_yn, step_therapy_yn, quantity_limit_yn) %>%
-    mutate(date = date_var)
+
+# Convert to data.table if not already
+setDT(data)
+
+# Ensure consistent data types
+data[, `:=`(
+  formulary_id = as.character(formulary_id),
+  rxcui = as.character(rxcui),
+  ndc = as.character(ndc),
+  drugname = as.character(drugname),
+  prior_authorization_yn = fifelse(as.character(prior_authorization_yn) == "Y", 1L, 0L)
+  # step_therapy_yn = fifelse(as.character(step_therapy_yn) == "Y", 1L, 0L),
+  # quantity_limit_yn = fifelse(as.character(quantity_limit_yn) == "Y", 1L, 0L)
+)]
+
+# Convert the date string to Date type
+date_var <- as.Date(date_var, format = "%Y%m%d")
+
+# Select the required columns and add the "date" column
+data_selected <- data[, .(
+  drugname,
+  formulary_id,
+  rxcui,
+  ndc,
+  prior_authorization_yn,
+  # step_therapy_yn,
+  # quantity_limit_yn,
+  date = date_var
+)]
 }
 ```
 
 ```{r}
-# Apply the function to all files and combine the results into one data frame
 
+# Apply the function to all files and combine the results into one data frame
 combined_data <- mapply(
   process_file, 
   all_files, 
   names_df$date, 
   SIMPLIFY = FALSE
-) %>% bind_rows()
+) %>% bind_rows() %>% 
+  distinct(drugname, date, formulary_id, ndc, rxcui, prior_authorization_yn)
+
+```
+```{r}
+# Convert to data.table if not already
+setDT(combined_data)
+
+# Drop rows with NA in ndc, group by rxcui and formulary_id, and calculate mean
+test <- combined_data[!is.na(ndc), 
+                      .(mpa = mean(prior_authorization_yn, na.rm = TRUE)), 
+                      by = .(rxcui, date, formulary_id)]
+
+```
+```{r}
+rxcuitest <- as.data.frame(table(test$mpa))
 ```
 
-# The 2006-06 formulary file is different from others, it has an extra level of nesting: contract_ID. I uploaded and manipulated it manually.
-# As of 10/3/2024 - we don't need to do this becuase we don't have any molecules that were approved before 2007.
 
-```{r, Read in 2006-06 file}
-# Switch outhe directory and file name as necessary
+```{r}
+write.csv(combined_data, "C://Users//Nick//Documents//GENCO//part1//output//part1-full_data-3-26-2025")
+```
+```{r}
+combined_data <- read.csv("C://Users//Nick//Documents//GENCO//part1//output//part1-full_data-3-26-2025")
 
-extradat <- read_dta("C://Users//Nick//Desktop//VA//GENCO//extra file//different formulary file 20060630 with drug names.dta")
+
 ```
 
-```{r, Check if prior authorization varies across contract ID.}
-set.seed(52)
-chk <- extradat %>% group_by(formulary_id) %>% slice_sample(n=50)
+## Count if there's a difference in prior auth in the first 9 digits of NDC vs. full, 11-digit, NDC. There's about 7000 rows with a different prior_auth for two different ndc11 (from the same ndc9 stem) in the same formulary in the same 6-month period.
 
-chk2006 <- chk %>% group_by(formulary_id, ndc) %>% dplyr::summarise(prior_auth_yn = sum(prior_auth_yn == "Y")/ n(),
-                                                                    quantity_limit_yn = sum(quantity_limit_yn == "Y")/ n(), step_ther_yn = sum(step_ther_yn == "Y")/ n())
 
-# Spoiler - it doesn't.
+```{r}
+# https://www.fda.gov/drugs/drug-approvals-and-databases/ndc-product-file-definitions
+# https://health.maryland.gov/phpa/OIDEOR/IMMUN/Shared%20Documents/Handout%203%20-%20NDC%20conversion%20to%2011%20digits.pdf
+
+#https://forums.ohdsi.org/t/how-to-determine-whether-a-drug-is-brand-or-generics/5745/5
 ```
 
-```{r, Drop column ID and de-duplicate based on formulary ID and NDC}
-extradat2 <- extradat %>% select(formulary_id, ndc, prior_auth_yn) 
-extradat2 <- extradat2[!duplicated(extradat2[c(1,2)]),]
+
+
+
+```{r}
+
+# Convert to data.table if not already
+setDT(combined_data)
+
+# Remove duplicates based on selected columns
+combined_data <- unique(combined_data, by = c("drugname", "date", "formulary_id", "ndc", "rxcui", "prior_authorization_yn"))
+
+combined_data[, ndc := as.numeric(ndc)]
+# Remove the last two digits from ndc11
+combined_data[, ndc_trimmed := substr(ndc, 1, nchar(ndc) - 2)]
+
+# Extract the last 4 digits as seg2
+combined_data[, seg2 := substr(ndc_trimmed, nchar(ndc_trimmed) - 3, nchar(ndc_trimmed))]
+
+# Extract the remaining part as seg1
+combined_data[, seg1 := substr(ndc_trimmed, 1, nchar(ndc_trimmed) - 4)]
+
+# String pad seg1 to 4 characters if it is less than 5 characters
+combined_data[, seg1_padded := fifelse(nchar(seg1) < 5, sprintf("%04d", as.numeric(seg1)), as.character(seg1))]
+
+# Create the PRODUCTNDC variable
+combined_data[, PRODUCTNDC := paste(seg1_padded, seg2, sep = "-")]
+
+# Remove rows where PRODUCTNDC is NA
+combined_data <- combined_data[!is.na(PRODUCTNDC)]
+
+# Drop any remaining duplicates
+setkey(combined_data, NULL) # Ensures uniqueness
 ```
 
-```{r, Clean up variables}
-extradat2$date = lubridate::ymd("20060630")
-extradat2$rxcui <- NA
-extradat2$prior_authorization_yn <- extradat2$prior_auth_yn
-extradat2 <- extradat2 %>% select(formulary_id, rxcui, ndc, prior_authorization_yn, date)
+
+```{r}
+# Rows in formulary data that were not found when queried?
+test_dat = combined_data %>% filter(PRODUCTNDC %in% naNDC10)
+
 ```
 
-```{r, Join with full dataset:}
-extradat2$formulary_id <- as.character(extradat2$formulary_id)
-extradat2$ndc <- as.character(extradat2$ndc)
-
-full_data <- bind_rows(extradat2, combined_data)
-rm(combined_data, extradat, extradat2)
+```{r}
+test_dat <- combined_data[PRODUCTNDC %in% naNDC]
 ```
 
-```{r, Create dataset}
-write.csv(combined_data, "part1-full_data.csv")
+```{r}
+test_dat <- unique(test_dat, by = c("drugname", "ndc", "rxcui", "prior_authorization_yn"))
 ```
+
+```{r}
+test_dat <- test_dat %>% left_join(rxcui_results_nda_sample, by=c("rxcui" = "id"))
+```
+
+```{r}
+test_dat <- test_dat %>% filter(is.na(ingredient))
+```
+
+```{r}
+FIRMAGON = test_dat %>% filter(drugname %in% missed$drugname)
+```
+
+```{r}
+drugnames_to_search = test_dat %>% select(drugname) %>% table() %>% as.data.frame()
+```
+
+```{r}
+drugnames_to_search_full = test_dat %>%  as.data.frame()
+```
+
+```{r}
+write.csv(drugnames_to_search, "drugnames_to_search.csv")
+```
+
+```{r}
+dg_long_mol <- long_mol %>% select(trade_name) %>% distinct()
+tradename <- dg_long_mol$trade_name
+#write.csv(dg_long_mol, "dg_long_mol.csv")
+```
+
+```{r}
+missed = drugnames_to_search %>% filter(drugname %in% tradename) %>% select(drugname)
+
+```
+
+```{r}
+write.csv(missed, "missed.csv")
+```
+
+```{r}
+all_ndcs  <- unique(combined_data, by = c("PRODUCTNDC", "rxcui"))
+
+```
+
+```{r}
+# No RXCUIs prior to 2010?
+na_rxcui_by_date <- combined_data %>% distinct(date, PRODUCTNDC, rxcui) %>% 
+  group_by(date) %>%
+  summarize(n = n(), na_rxcui_count = sum(is.na(rxcui) | rxcui == ""))
+
+```
+
+
+```{r}
+library(jsonlite)
+library(dplyr)
+library(pbapply)
+
+getNdcProps <- function(ndc) {
+  tryCatch({
+    cat("Processing NDC:", ndc, "\n")
+    Sys.sleep(0.1)
+
+    url <- paste0('https://rxnav.nlm.nih.gov/REST/ndcproperties?id=', ndc)
+    ndc_properties <- fromJSON(url, flatten = TRUE)
+    property_list <- ndc_properties$ndcPropertyList$ndcProperty$propertyConcept
+
+    if (!is.null(property_list)) {
+      property_df <- bind_rows(lapply(property_list, as.data.frame)) %>%
+        mutate(id = ndc, appl_no = propValue, message = NA, source = "NDC") %>%
+        select(id, appl_no, message, source)
+
+      return(property_df)
+    } else {
+      return(data.frame(id = ndc, appl_no = NA, message = "No NDC propertyConcept found", source = "NDC"))
+    }
+  }, error = function(e) {
+    cat("Error querying NDC:", ndc, "-", e$message, "\n")
+    return(data.frame(id = ndc, appl_no = NA, message = e$message, source = "NDC"))
+  })
+}
+
+getRxcuiProps <- function(rxcui) {
+  tryCatch({
+    cat("Processing RXCUI:", rxcui, "\n")
+    Sys.sleep(0.1)
+
+    url <- paste0('https://rxnav.nlm.nih.gov/REST/rxcui/', rxcui, '/allProperties.json?prop=all')
+    rxcui_props <- fromJSON(url, flatten = TRUE)
+    prop_concepts <- rxcui_props$propConceptGroup$propConcept
+
+    if (!is.null(prop_concepts)) {
+      rxcui_df <- as.data.frame(prop_concepts) %>%
+        mutate(id = rxcui, appl_no = propValue, message = NA, source = "RXCUI") %>%
+        select(id, appl_no, message, source)
+
+      return(rxcui_df)
+    } else {
+      return(data.frame(id = rxcui, appl_no = NA, message = "No RXCUI propConcept found", source = "RXCUI"))
+    }
+  }, error = function(e) {
+    cat("Error querying RXCUI:", rxcui, "-", e$message, "\n")
+    return(data.frame(id = rxcui, appl_no = NA, message = e$message, source = "RXCUI"))
+  })
+}
+```
+
+
+```{r}
+chunk_size <- 500
+
+# --- NDCs ---
+ndc_chunks <- split(all_ndcs$PRODUCTNDC, ceiling(seq_along(all_ndcs$PRODUCTNDC) / chunk_size))
+ndc_results_all <- list()
+
+for (i in seq_along(ndc_chunks)) {
+  cat("Processing NDC chunk", i, "of", length(ndc_chunks), "\n")
+  ndc_chunk_result <- pblapply(ndc_chunks[[i]], getNdcProps)
+  ndc_results_all[[i]] <- bind_rows(ndc_chunk_result)
+  saveRDS(ndc_results_all[[i]], file = paste0("ndc_results_chunk_", i, ".rds"))
+}
+
+ndc_results_final <- bind_rows(ndc_results_all)
+saveRDS(ndc_results_final, "ndc_results_all.rds")
+
+```
+```{r}
+# --- RXCUIs ---
+rxcui_chunks <- split(all_rxcui$rxcui, ceiling(seq_along(all_rxcui$rxcui) / chunk_size))
+rxcui_results_all <- list()
+
+for (i in seq_along(rxcui_chunks)) {
+  cat("Processing RXCUI chunk", i, "of", length(rxcui_chunks), "\n")
+  rxcui_chunk_result <- pblapply(rxcui_chunks[[i]], getRxcuiProps)
+  rxcui_results_all[[i]] <- bind_rows(rxcui_chunk_result)
+  saveRDS(rxcui_results_all[[i]], file = paste0("rxcui_results_chunk_", i, ".rds"))
+}
+
+rxcui_results_final <- bind_rows(rxcui_results_all)
+saveRDS(rxcui_results_final, "rxcui_results_all.rds")
+```
+
+```{r}
+ndc_results_final <- readRDS("ndc_results_all.rds")
+
+rxcui_results_final <- readRDS("rxcui_results_all.rds")
+
+```
+
+
+
+
+```{r Combine all chunks into one final dataframe}
+# Combine all chunks into one final dataframe
+ndc_results_final <- ndc_results_final%>% distinct() 
+rxcui_results_final <- rxcui_results_final %>% distinct()
+
+# Optionally save final result
+#write.csv(ndc_results, "ndc_results_final.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+test <- ndc_results_final %>% filter(is.na(appl_no)) %>% distinct()
+
+```
+
+```{r}
+naNDC <- test$id
+```
+
+```{r}
+ndc_results_nda <- ndc_results_final %>% filter(grepl("^(ANDA|NDA)[0-9]", appl_no)) %>% filter(appl_no != "NDA" & appl_no != "ANDA"& appl_no != "NDA AUTHORIZED GENERIC") %>% distinct()
+```
+
+```{r}
+test2 = rbind(ndc_results_nda, test)
+
+```
+
+```{r}
+test3 <- left_join(test2, long_mol, by = "appl_no") 
+```
+```{r}
+test3 <- test3 %>% arrange(id)
+```
+
+``
+
+```{r}
+rxcui_results_nda <- rxcui_results_final %>% filter(grepl("^(ANDA|NDA)[0-9]", appl_no)) %>% filter(appl_no != "NDA" & appl_no != "ANDA"& appl_no != "NDA AUTHORIZED GENERIC") %>% distinct()
+```
+
+
+```{r}
+rxcui_results_nda_sample <- left_join(rxcui_results_nda, long_mol, by = "appl_no") 
+
+```
+```{r}
+rxcui_results_nda_sample <- rxcui_results_nda_sample %>% drop_na(ingredient) %>% distinct(id, appl_no, ingredient)
+```
+
+
+```{r}
+ndc_results_ndcs <- ndc_results_nda %>% select(id) %>% distinct()
+
+not_selected <- all_ndcs %>% filter(PRODUCTNDC %!in% ndc_results_ndcs$PRODUCTNDC)
+```
+
+```{r}
+not_selected_rxnorm <- ndc_results %>% filter(PRODUCTNDC %in% not_selected$PRODUCTNDC)
+```
+
+
+```{r}
+ndc_results_message <- ndc_results %>% select(PRODUCTNDC, message) %>%  filter(!is.na(message)) %>% distinct()
+```
+
+```{r}
+ndc_results_w_bla <- ndc_results %>% filter(grepl("^(ANDA|NDA|BLA)[0-9]", appl_no)) %>% filter(appl_no != "NDA" & appl_no != "ANDA"& appl_no != "BLA" & appl_no != "NDA AUTHORIZED GENERIC") %>% distinct()
+```
+
+
+
+```{r}
+long_mol <- read.csv("C://Users//Nick//Documents//GENCO//part2//long_mol10-30-2024.csv")
+#Downloaded from Drugs@FDA. Contact Ravi Gupta for data. ```
+```
+
+```{r}
+setDT(long_mol)
+setDT(ndc_results_nda)
+setDT(rxcui_results_nda)
+
+ndc_results_nda[, appl_no := as.character(appl_no)]
+rxcui_results_nda[, appl_no := as.character(appl_no)]
+ndc_results_nda[, PRODUCTNDC := as.character(id)]
+ndc_results_nda <- ndc_results_nda[, .(PRODUCTNDC, appl_no)]
+rxcui_results_nda[, rxcui := as.character(id)]
+rxcui_results_nda <- rxcui_results_nda[, .(rxcui, appl_no)]
+
+# Perform the merge (equivalent to left join)
+#ndc_merged_dt <- merge(ndc_results_nda, long_mol, by = "appl_no", all.x = TRUE)
+#ndc_merged_dt <- ndc_merged_dt %>% mutate(PRODUCTNDC = id)
+#rxcui_merged_dt <- merge(rxcui_results_nda, long_mol, by = "appl_no", all.x = TRUE)
+#rxcui_merged_dt <- ndc_merged_dt %>% mutate(rxcui = id)
+```
+
+
+```{r}
+via_ndc_test <- all_ndcs %>% inner_join(ndc_results_nda, "PRODUCTNDC") %>% select(PRODUCTNDC) %>% distinct()
+
+via_rxcui_test <- all_ndcs %>% inner_join(rxcui_results_nda, "rxcui") %>% select(PRODUCTNDC) %>% distinct()
+
+test <- rbind(via_ndc_test, via_rxcui_test) %>% select(PRODUCTNDC) %>% distinct()
+```
+
+```{r}
+all_ndcs_test <- all_ndcs %>% left_join(ndc_results_nda, "PRODUCTNDC")
+all_ndcs_test <- all_ndcs_test %>% left_join(rxcui_results_nda, "rxcui")
+
+```
+
+```{r}
+all_ndcs_test <- all_ndcs_test %>% select(PRODUCTNDC, appl_no.x, appl_no.y)
+```
+
+```{r}
+all_ndcs_test[, checkAppl_no := fcase(
+  !is.na(appl_no.x) & !is.na(appl_no.y) & appl_no.x == appl_no.y, "Appl_Nos Match",
+  is.na(appl_no.x) & !is.na(appl_no.y),                        "Appl_No found via RXCUI",
+  !is.na(appl_no.x) & is.na(appl_no.y),                        "Appl_No found via NDC",
+  !is.na(appl_no.x) & !is.na(appl_no.y) & appl_no.x != appl_no.y, "Appl_no do not Match",
+  is.na(appl_no.x) & is.na(appl_no.y),                         "No appl_no found via RXCUI or NDC search"
+)]
+
+table(all_ndcs_test$checkAppl_no)
+```
+
+```{r}
+long_mol_test <- long_mol %>% select(ingredient, appl_no)
+long_mol_test[, appl_no.x := as.character(appl_no)]
+long_mol_test <- long_mol_test[, .(ingredient, appl_no.x)]
+
+setDT(long_mol_test)
+
+all_ndcs_test <- all_ndcs_test %>% left_join(long_mol_test, "appl_no.x")
+long_mol_test[, appl_no.y := as.character(appl_no.x)]
+long_mol_test <- long_mol_test[, .(ingredient, appl_no.y)]
+
+all_ndcs_test <- all_ndcs_test %>%left_join(long_mol_test, "appl_no.y")
+```
+
+```{r}
+
+all_ndcs_test[, checkIngredient := fcase(
+  !is.na(ingredient.x) & !is.na(ingredient.y) & ingredient.x == ingredient.y, "Included: Ingredients match",
+  is.na(ingredient.x) & !is.na(ingredient.y),                               "Included: Ingredient found via RXCUI",
+  !is.na(ingredient.x) & is.na(ingredient.y),                               "Included: Ingredient found via NDC",
+  !is.na(ingredient.x) & !is.na(ingredient.y) & ingredient.x != ingredient.y, "Included: Ingredients do not Match",
+  is.na(ingredient.x) & is.na(ingredient.y),                                "Not included: ingredient not in list"
+)]
+
+```
+
+```{r}
+ingredients <- all_ndcs_test %>% select(ingredient) %>% mutate(exists = 1) %>% distinct()
+
+```
+
+```{r}
+all_ndc_final <- all_ndcs_test %>% filter(checkIngredient %in% c("Included: Ingredients match", "Included: Ingredient found via RXCUI", "Included: Ingredient found via NDC")) %>% select( PRODUCTNDC, ingredient.x, ingredient.y) %>% distinct() %>% mutate(ingredient = if_else(is.na(ingredient.x), ingredient.y, ingredient.x)) %>% select(-ingredient.x, -ingredient.y) %>% mutate(exists = 1)
+
+```
+
+
+```{r}
+setDT(all_ndc_final)
+setDT(combined_data)
+all_ndc_final[, PRODUCTNDC := as.character(PRODUCTNDC)]
+combined_data[, PRODUCTNDC := as.character(PRODUCTNDC)]
+
+# Left join merged_dt to combined_data
+combined_data1 <- combined_data[all_ndc_final, on = "PRODUCTNDC", keep ]
+```
+
+```{r}
+combined_data1 <- combined_data1 %>% select(date, formulary_id, ndc, rxcui, PRODUCTNDC, prior_authorization_yn, ingredient)
+
+```
+
+
+
+```{r}
+all_ndc_final %>% select(ingredient) %>% distinct() %>% nrow()
+
+combined_data1 %>% select(ingredient) %>% distinct() %>% nrow()
+
+```
+
+```{r}
+combined_data1 %>% distinct(date, ingredient, formulary_id, prior_authorization_yn) %>% group_by(date, ingredient) %>% 
+  summarise(num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),
+    prop_pauth_free = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA)) %>% ggplot(aes(x=as.Date(date), y= ingredient, alpha = prop_pauth_free)) + geom_tile(fill = "blue1") + labs(y="Ingredient", x= "Date") + scale_x_date() +theme_minimal()
+
+```
+
+```{r}
+combined_data1 %>% distinct(date, ingredient, formulary_id, prior_authorization_yn, ndc) %>% filter(ingredient %in% c("SEMAGLUTIDE", "ABIRATERONE ACETATE", "ABALOPARATIDE")) %>% group_by(date, ingredient, ndc) %>% 
+  summarise(num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),
+    prop_pauth_free = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA)) %>% ggplot(aes(x=as.Date(date), y= interaction(ndc, ingredient), alpha = prop_pauth_free)) + geom_tile(fill = "blue1") + labs(y="Ingredient", x= "Date") + scale_y_discrete(guide = "axis_nested") + scale_x_date() +theme_minimal()
+
+```
+
+
+```{r}
+# Sample a subset
+#merged_subset <- merged_dt[1:5000]
+
+# Perform the join safely
+combined_data1 <- combined_data[merged_dt_test, on = "PRODUCTNDC", allow.cartesian = TRUE]
+```
+
+
+
+
+```{r}
+combined_data1 %>% distinct(date, appl_no, approval_date1, ingredient, formulary_id, prior_authorization_yn, generics_presence) %>% group_by(date, approval_date1, ingredient) %>% 
+  summarise(num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),
+    prop_pauth_free = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA)) %>% ggplot(aes(x=as.Date(date), y = reorder(ingredient, as.Date(approval_date1)), alpha = prop_pauth_free)) + geom_point(aes(x=as.Date(approval_date1), y = reorder(ingredient, as.Date(approval_date1))), color = "red3") + geom_tile(fill = "blue1") + labs(y="Ingredient", x= "Date") + scale_x_date() +theme_minimal()
+
+```
+
+```{r}
+combined_data1  %>% distinct(date, approval_date1, ingredient, formulary_id, prior_authorization_yn, generics_presence, appl_no) %>% group_by(date, approval_date1, ingredient, appl_no) %>% 
+  summarise(num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),
+    prop_pauth_free = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA)) %>% ggplot(aes(x=as.Date(date), y = interaction(appl_no, ingredient), alpha = prop_pauth_free)) + geom_point(aes(x=as.Date(approval_date1), y = interaction(appl_no, ingredient)), color = "red3") + scale_y_discrete(guide = "axis_nested") + geom_tile(fill = "blue1") + labs(y="Ingredient", x= "Date") + scale_x_date() +  labs(subtitle = "Formularies free of Prior Auth across all covered NDCs", fill = "Prop Formularies No Prior Auth") +  # set legend title
+  theme(legend.position = "bottom") 
+
+```
+
+```{r}
+combined_data1  %>% distinct(date, approval_date1, ingredient, formulary_id, prior_authorization_yn, generics_presence, appl_no, PRODUCTNDC, ndc) %>% group_by(date, approval_date1, ingredient, appl_no, ndc) %>% 
+  summarise(num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),
+    prop_pauth_free = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA)) %>% ggplot(aes(x=as.Date(date), y = interaction(ndc, appl_no, ingredient), alpha = prop_pauth_free)) + geom_point(aes(x=as.Date(approval_date1), y = interaction(ndc, appl_no, ingredient)), color = "red3") + scale_y_discrete(guide = "axis_nested") + geom_tile(fill = "blue1") + labs(y="Ingredient", x= "Date") + scale_x_date() +  labs(subtitle = "Formularies free of Prior Auth across all covered NDCs", fill = "Prop Formularies No Prior Auth") +  # set legend title
+  theme(legend.position = "bottom") 
+
+```
+
+```{r}
+test_cd <- combined_data %>% select(seg1_padded, PRODUCTNDC, date, prior_authorization_yn) %>% filter(seg1_padded %in% c("0169", "47335", "57894", "77205", "60505", "0378", "0143")) %>%drop_na() %>%  distinct()
+
+```
+
+```{r}
+
+combined_data1 %>% filter(ingredient == 57894015012) %>% ggplot(aes(x = date, y = formulary_id, fill = as.factor(prior_authorization_yn))) + geom_tile(alpha = 0.5)
+```
+
+
+```{r}
+combined_data1 %>% filter(ingredient == "ABIRATERONE ACETATE") %>% distinct(date, prior_authorization_yn, appl_no, formulary_id) %>% ggplot(aes(x = date, fill = as.factor(prior_authorization_yn))) + geom_bar() + facet_grid(rows = vars(appl_no))
+```
+
 

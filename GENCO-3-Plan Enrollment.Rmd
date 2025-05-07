@@ -9,11 +9,22 @@ output: html_document
 
 # What this code does:
 1. Download formulary by plan by period files from Dropbox - save to a directory folder called "plan".
+
 2. Combine all formulary by plan by period files into one dataframe.
+
 3. Webscrape plan enrollment by month data from CMS website.
-3. Combine al plan enrollemnt by month data into one dataframe, summarize by first 6 months / last 6 moths of year.
-4. Join with formulary by period (with prior auth info) Medicare Part D dataset from Part D via formulary-plan-period crosswalk files from step 1 and step 2.
-5. Aggregate to the application number period to have a dataset with (1/0) if plan had a drug from this application number with prior auth rules in a period and enrollment numbers in this plan in a period.
+
+4. Combine all monthly plan enrollment files into one dataframe, summarize by January - June / July - December.
+
+5. Extract and monthly enrollment data 2007-2003 and aggregate to 6-month periods (plan level) by taking the average monthly enrollment
+proportion (among all plans) for a plan by period (i.e. in period X, Plan A has 100 people but there are 400 enrollees across all plans, then Plan A receives a weight of 0.25). 
+
+5. Join enrollment data to plan-formulary crosswalk dataset at 6-month period. Now that enrollment data is now organized at the formulary level with the sum enrollment weight (e.g. formulary is covered by Plan A and Plan C which have 25% and 14% of all monthly enrollees for period X, so 39% of all average monthly enrollees).
+
+6. Join formulary-level enrollment data to formulary-level prior authorization data. The data is now organized as ingredient > application number (branded/generic) > RxCUI > NDC > formulary > period.
+
+7. Create a “conversion date” variable – the period at which NDCs associated with a generic application number appear in 10% of the formularies this basket of generic NDCs is ever going to appear in.
+
 
 ```{r setup, include=FALSE}
 library(rdrop2) # install_github("karthik/rdrop2") - use to connect to dropbox
@@ -61,7 +72,7 @@ download_function <- function(match_item) {
 lapply(x$matches, download_function)
 ```
 
-```{r}
+```{r, Process Plan - Formulary Crosswalk Data Files}
 # Define the path to the folder containing the .dta, .txt, and .zip files
 folder_path <- "C://Users//Nick//Desktop//VA//GENCO//plan"
 
@@ -162,39 +173,28 @@ combined_plan_data <- mapply(
   SIMPLIFY = FALSE
 ) %>% bind_rows()
 ```
+
 ```{r, Clean Plan Data}
 # Importantly - pad the plan_id with 0s to eventually join it to formulary-level data.
 combined_plan_data <- combined_plan_data %>% select(contract_id, plan_id, formulary_id, segment_id, date) %>% mutate(plan_id = str_pad(plan_id, 3, pad = "0")) %>% distinct()
 
 ```
 
-```{r}
+```{r, Save Plan-Formulary File Locally}
 write.csv(combined_plan_data, "C://Users//Nick//Desktop//VA//GENCO-Misc//combined_plan_data_n=134198-10-31-2024.csv")
 
 ```
 
-```{r}
+```{r, Load Plan-Formulary Data}
 combined_plan_data <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//combined_plan_data_n=134198-10-31-2024.csv")
 
 ```
 
-```{r}
-
+```{r, Clean Plan-Formulary Data}
 combined_plan_data <- combined_plan_data %>% filter(segment_id != "SEGMENT_ID")
 combined_plan_data$segment_id <- as.factor(as.numeric(combined_plan_data$segment_id))
 combined_plan_data$plan_id <- as.factor(as.numeric(combined_plan_data$plan_id))
 
-```
-
-```{r}
-plan_org <- combined_plan_data %>% select(formulary_id, contract_id, plan_id, segment_id, date) %>% group_by(formulary_id, contract_id, plan_id, segment_id, date) %>% filter(segment_id != "SEGMENT_ID") %>% summarize(n = n())
-```
-
-```{r}
-plan_test <- plan_org %>% select(plan_id, segment_id, date) %>% group_by(plan_id, segment_id, date) %>% summarize(n = n())
-```
-
-```{r}
 combined_plan_data <- combined_plan_data %>% select(formulary_id, contract_id, plan_id, segment_id, date) %>% group_by(formulary_id, contract_id, plan_id, segment_id, date)
 ```
 
@@ -372,19 +372,32 @@ process_file <- function(file_path, date_var) {
 all_data <- purrr::map2_dfr(all_csv_files, names_df$date, process_file)
 ```
 
-```{r, Clean Enrollment Data}
-enrollment <- data.frame(contract_id = all_data$`contract number`,
-                         plan_id = all_data$`plan id`,
+```{r}
+write.csv(all_data, "C://Users//Nick//Desktop//VA//GENCO-Misc//part3-all-enrollment-data-1-7-2025.csv")
+
+```
+
+```{r}
+all_data <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//part3-all-enrollment-data-1-7-2025.csv")
+
+```
+
+
+```{r, Clean Enrollment Data & Create indicator for 6 month period}
+enrollment <- data.frame(contract_id = all_data$`contract.number`,
+                         plan_id = all_data$`plan.id`,
                          enrollment = all_data$enrollment,
+                         partd = all_data$`offers.part.d`,
                          date = as.Date(all_data$date))
 
-enrollment <- enrollment %>%
+enrollment <- enrollment %>% 
   mutate(
-    date = case_when(
+    period = case_when(
       month(date) %in% 1:6 ~ as.Date(paste0(year(date), "-06-30")), # Summarize by first 6 months of year and
       month(date) %in% 7:12 ~ as.Date(paste0(year(date), "-12-31")) # last 6 months of the year.
     )
-  )
+  ) %>% 
+  distinct()
 
 
 #  (1) The privacy laws of HIPAA have been interpreted to prohibit publishing 
@@ -397,20 +410,27 @@ enrollment$enrollment <- sapply(enrollment$enrollment, function(x) ifelse(x == "
 
 enrollment$enrollment <- as.numeric(enrollment$enrollment)
 
+# Drop 51 observations with contract_ids and no plan_id
+#enrollment <- enrollment[complete.cases(enrollment), ]
 ```
 
-```{r}
+```{r, Aggregate at 6-month period and create enrollment weights}
 # Group by contract_num, plan_id, and the 6-month period, then summarize enrollment
+# * For each plan we have monthly enrollment numbers, we want 6-month chunks to align with the prior auth data.
+
 enrollment_total <- enrollment %>%
   group_by(date) %>%
-  summarise(total_enrollment = mean(enrollment, na.rm = TRUE))
+  summarise(total_enrollment = sum(enrollment, na.rm = TRUE))
 
 enrollment_summary <- left_join(enrollment, enrollment_total, by = "date")
 
 enrollment_summary <- enrollment_summary %>% 
- group_by(contract_id, plan_id, date) %>%
+ group_by(contract_id, plan_id, partd, period) %>%
  # average plan enrollment for the 6 month period divided by average  
- summarise(enrollment_per_plan_per6mo = round(mean(enrollment, na.rm = TRUE), 1)/ total_enrollment)
+ mutate(enrollment_weight = enrollment/ total_enrollment) %>% 
+ summarize(avg_enrollment_weight = round(mean(enrollment_weight, na.rm = TRUE), 6)) %>% 
+  distinct() %>% 
+  mutate(date = period) %>% select(-period)
 
 #enrollment_summary <- enrollment_summary %>% group_by(date) %>% mutate(total_enrollment_weight = round(scale(total_enrollment), 3))
 
@@ -420,16 +440,25 @@ enrollment_summary <- enrollment_summary %>%
 ```{r, Join Contract-Plan Crosswalk to Enrollment Data}
 combined_plan_data$date <- as.Date(combined_plan_data$date)
 enrollment_summary$plan_id <- as.factor(as.numeric(enrollment_summary$plan_id))
-enrollmentcw <- full_join(combined_plan_data, enrollment_summary, by = c("contract_id", "plan_id", "date"))
 
-enrollmentcw <- enrollmentcw %>% select(-X) %>% distinct()
-#enrollmentcw <- enrollmentcw %>% tidyr::drop_na(total_enrollment)
+enrollmentlj <- left_join(combined_plan_data, enrollment_summary, by = c("contract_id", "plan_id", "date"))
+
+enrollmentlj <- enrollmentlj %>% distinct()
 
 ```
 
 ```{r, Remove leading 000 from the formulary_id from the enrollment data.}
-enrollmentcw$formulary_id <- sub("^000", "", enrollmentcw$formulary_id)
+enrollmentlj$formulary_id <- sub("^000", "", enrollmentlj$formulary_id)
 ```
+
+```{r, Save enrollment data locally}
+write.csv(enrollmentlj, "C://Users//Nick//Desktop//VA//GENCO-Misc//part3-enrollment-data-12-3-2024.csv")
+```
+
+```{r}
+enrollmentlj <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//part3-enrollment-data-12-3-2024.csv")
+```
+
 
 ```{r, Load Formulary by App No. per period data}
 results <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//part2-data-10-30-2024.csv")
@@ -437,17 +466,15 @@ results <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//part2-data-10-30-
 ```
 
 ```{r, Correct Variable Types in Formulary Data}
-results$formulary_id <- as.character(results$formulary_id)
-results$date <- as.Date(results$date)
+chk1$formulary_id <- as.character(chk1$formulary_id)
+chk1$date <- as.Date(chk1$date)
 
-results <- results %>% mutate(pauth_presence = if_else(prior_authorization_yn == "Y", 1, 0), 
-                              step_presence = if_else(step_therapy_yn == "Y", 1, 0),
-                              quant_presence = if_else(quantity_limit_yn == "Y", 1, 0)) %>% select(-prior_authorization_yn, -step_therapy_yn, -quantity_limit_yn, -step_presence, -quant_presence)
+results <- chk1 %>% distinct()
 
 ```
 
 ```{r, Load Drugs@FDA app number dataset}
-long_mol <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//long_mol10-30-2024.csv") # Downloaded from Drugs@FDA. Contact Ravi Gupta for data. 
+long_mol <- read.csv("C://Users//Nick//Documents//GENCO//long_mol10-30-2024.csv") # Downloaded from Drugs@FDA. Contact Ravi Gupta for data. 
 ```
 
 ```{r, Manipulate certain rows to get a unique ingredient - app_no combination}
@@ -460,180 +487,399 @@ ingredients <- long_mol %>%
                              trade_name)) %>% select(ingredient, appl_no) %>% distinct()
 ```
 
-# Select subset of ingredients
 
-```{r}
-sub <- long_mol %>% filter(ingredient == "ABIRATERONE ACETATE" | ingredient == "ALVIMOPAN" | ingredient == "IBRUTINIB") %>% select(appl_no) %>% distinct()
+```{r, Create Enrollment Share Values}
+# Create formulary-level enrollment variable.
+# Count number of distinct plans and number of plans missing enrollment data.
+formulary_enrollmentshare <- enrollmentlj %>% 
+  group_by(formulary_id, date) %>% 
+  dplyr::summarise(sum_enrollment_share = round(sum(avg_enrollment_weight, na.rm = T), 5),
+                   plans = n_distinct(plan_id, contract_id, segment_id),
+                   plans_missing_enrollment = sum(is.na(avg_enrollment_weight))) %>% distinct()
 ```
 
-```{r, Limit to necessary data}
-
-ndc_level_e <- results %>% select(app_no, date, ndc, rxcui, pauth_presence, formulary_id) 
-
+```{r, Join Enrollment Data to Part D (NDC) dataset}
+ndc_level_f <- left_join(results, formulary_enrollmentshare, by = c("formulary_id", "date"))
 ```
 
-```{r}
-ndc_level_e_sum_check <- ndc_level_e %>% mutate(ndc = if_else(is.na(ndc), 9999999, ndc), ndcmissing = if_else(ndc == 9999999, 1, 0)) %>% group_by(ingredient, app_no, rxcui, ndcmissing) %>% 
-  dplyr::summarize(minDate = min(date, na.rm = T),
-          maxDate = max(date, na.rm = T),
-          sum_pauth = sum(pauth_presence, na.rm = T), 
-          pauth = if_else(sum_pauth > 1, 1, 0),
-          pauth_prop = mean(pauth_presence, na.rm = T))
-
-# Ok so the NA RXCUIs are perfect duplicates of those with NDCs.
-# Even if you didn't have the NDCs - you would get accurate count of formulary / prior auth information.
-
-```
-```{r}
-# Let's do a micro example: ABIRATERONE ACETATE
-ndc_level_e_sum_check <- ndc_level_e %>% mutate(ndc = if_else(is.na(ndc), 9999999, ndc), ndcmissing = if_else(ndc == 9999999, 1, 0)) %>% group_by(ingredient, app_no, rxcui, ndcmissing, date) %>% filter(ingredient == "ABIRATERONE ACETATE") %>% summarise(pauth_presence = if_else(sum(pauth_presence, na.rm = T) > 1, 1, 0)) %>% pivot_wider(names_from = date, values_from = pauth_presence)
-```
-
-```{r}
-# Perfectly cuts it in half
-ndc_level_e <- ndc_level_e %>% tidyr::drop_na(ndc)
-```
-
-
-```{r, Add Ingredient to NDC dataset}
-
-# After joining ingredient data to Part D data- only 46 out of the 106 generic ingredients in the original Drugs@FDA have Part D data.
-
-ndc_level_e <- left_join(ndc_level_e, ingredients, c("app_no" = "appl_no"))
-```
-
-
-
-```{r}
-library(data.tree)
-library(treemap)
-library(DiagrammeR)
-subset$pathString <- paste(subset$ingredient,
-                            subset$app_no,
-                            subset$rxcui,
-                            subset$ndc,
-                            #ndc_level_e$date,
-                            sep = "|")
-acme <- as.Node(subset)
-
-```
-
-```{r}
-
-subset <- ndc_level_e_ndc %>% filter(ingredient == "ABIRATERONE ACETATE")
-
-```
-```{r}
-subset <- subset %>% select(ingredient, app_no, rxcui, ndc, pathString) %>% distinct()
-vplot(as.dendrogram(acme))
-```
-```{r}
-useRtree <- as.Node(subset, pathDelimiter = "|")
-useRtreeList <- ToListExplicit(useRtree, unname = TRUE)
-radialNetwork( useRtreeList)
-```
-```{r}
-library(networkD3)
-acmeNetwork <- ToDataFrameNetwork(acme)
-simpleNetwork(acmeNetwork, fontSize = 8)
-```
-
-```{r}
-ndc_level_e_ndc <- left_join(ndc_level_e, enrollmentcw, by = c("formulary_id", "date"))
-```
-
-```{r}
-ndc_level_e_ndc$app_type <- ifelse(grepl("^NDA", ndc_level_e_ndc$app_no), "NDA", 
-                      ifelse(grepl("^ANDA", ndc_level_e_ndc$app_no), "ANDA", NA))
+```{r, Split apart application number to two columns}
+ndc_level_f$appl_type <- ifelse(grepl("^NDA", ndc_level_f$appl_no), "NDA", 
+                      ifelse(grepl("^ANDA", ndc_level_f$appl_no), "ANDA", NA))
 
 # Remove 'NDA' or 'ANDA' from 'app_no'
-ndc_level_e_ndc$app_no <- gsub("^(NDA|ANDA)", "", ndc_level_e_ndc$app_no)
+ndc_level_f$appl_no <- gsub("^(NDA|ANDA)", "", ndc_level_f$appl_no)
 ```
 
-```{r}
-ndc_level_e_sum_check_f  <- ndc_level_e_ndc %>% group_by(ingredient, app_no, rxcui, ndc, date) %>% summarise(pauth_presence_plan = if_else(sum(pauth_presence, na.rm = T) > 1, 1, 0)) %>% pivot_wider(names_from = date, values_from = pauth_presence_plan)
-```
-  
-```{r}
-write.csv(ndc_level_e_ndc, "C://Users//Nick//Desktop//VA//GENCO-Misc//ndc_level_e_ndc.csv" )
-```
-
-
-# What happens when I drop formularies with no enrollment?
-# No plan information
-# No NDC
-```{r} 
-no_enrollment <- ndc_level_e_ndc %>% tidyr::drop_na(total_enrollment) # lost 120,000 obs.
-#no_plan <- no_enrollment %>% tidyr::drop_na(plan_id) # same 
-#no_ndc <- no_enrollment %>% tidyr::drop_na(ndc) # lost 1.18 million
-
-```
-
-
-
-```{r}
-read.csv()
-
-```
-
-```{r}
-writexl::write_xlsx(drug_appearance_stats_overall_g, "C://Users//Nick//Desktop//VA//GENCO-Misc//drug-appearance_stats_by_ingredient-10-31-2024.xlsx")
-```
-
-```{r}
-#full <- read.csv("C://Users//Nick//Desktop//VA//GENCO-Misc//ndc_level_e_ndc.csv")
-```
-
-
-```{r, Find First Appearance for Every Ingredient at Formulary Level}
-drug_appearance_stats <- full %>% distinct(ingredient, app_type, app_no, rxcui, ndc, formulary_id, date) %>% 
-  group_by(ingredient, app_type, app_no, rxcui, ndc) %>% 
+```{r, Calculate Conversion Period}
+appearance <- ndc_level_f %>% filter(appl_type == "ANDA") %>% 
+group_by(ingredient, appl_type) %>% 
   arrange(date) %>% 
-  summarize(
-    total_formularies = n_distinct(formulary_id),
-    percentile_10_index = ceiling(0.10 * total_formularies),
-    percentile_50_index = ceiling(0.50 * total_formularies),
-    first_appearance = min(date),
-    date_10_percent = nth(date, percentile_10_index),
-    date_50_percent = nth(date, percentile_50_index),
-    date_100_percent = nth(date, total_formularies)
-    )
+  summarise(
+    unique_formularies_g = n_distinct(formulary_id),
+    first_appearance_g = min(date),
+    percentile_10_index_g = ceiling(0.10 * unique_formularies_g),
+    percentile_50_index_g = ceiling(0.50 * unique_formularies_g),
+
+    date_10_percent_g = nth(date, percentile_10_index_g),
+    
+    date_50_percent_g = nth(date, percentile_50_index_g),
+
+    blocks_to_10_percent_g = as.integer(difftime(date_10_percent_g, first_appearance_g, units = "days") / 180),
+    blocks_to_50_percent_g = as.integer(difftime(date_50_percent_g, first_appearance_g, units = "days") / 180),
+    diff = blocks_to_50_percent_g - blocks_to_10_percent_g) %>% select(-appl_type)
 ```
 
+```{r}
+writexl::write_xlsx(appearance, "C://Users//Nick//Desktop//VA//GENCO-Misc//Appearance-3-12-2025.xlsx")
+#write.csv(ndc_level_fj, "C://Users//Nick//Desktop//VA//GENCO-Misc//Full Dataset-3-12-2025.csv")
+#writexl::write_xlsx(ndc_level_fj_agg, "C://Users//Nick//Desktop//VA//GENCO-Misc//Formulary_Proportion-3-12-2025.xlsx")
+
+```
+
+
+```{r, Join back to master dataset}
+
+ndc_level_fin <- left_join(ndc_level_f, appearance, "ingredient")
+
+
+```
+```{r, Trim down final dataset}
+ndc_level_fin <- ndc_level_fin %>% select(ingredient, appl_no, appl_type, ndc11, date, date_10_percent_g, formulary_id, prior_authorization_yn, sum_enrollment_share)
+
+```
+```{r, Create two new variables - pre and post conversion}
+ndc_level_fin <- ndc_level_fin %>%
+  mutate(
+    pre_conversion = date_10_percent_g %m-% years(1), # Date one year before
+    post_conversion = date_10_percent_g %m+% years(1)  # Date one year after
+  )
+colnames(ndc_level_fin)[colnames(ndc_level_fin) == "date_10_percent_g"] <- "conversion_date"
+
+```
+
+```{r}
+
+library(dplyr)
+#library(hablar)
+
+# Collapse dataset to ingredient level
+ingredient_data <- ndc_level_fin %>%
+  group_by(ingredient, ndc11) %>%
+  summarise(
+    conversion_date = min(s(conversion_date), na.rm = TRUE),
+    pre_conversion = min(s(pre_conversion), na.rm = TRUE),
+    post_conversion = min(s(post_conversion), na.rm = TRUE),
+    earliest = min(date, na.rm = TRUE),
+    mid = median(date, na.rm = TRUE),
+    most_recent_date = max(date, na.rm = TRUE)) %>% 
+  mutate(conversion_date = if_else(is.infinite(conversion_date), NA, conversion_date),
+    pre_conversion = if_else(is.infinite(pre_conversion), NA, pre_conversion),
+    post_conversion = if_else(is.infinite(post_conversion), NA, post_conversion),
+        converted = ifelse(any(!is.na(conversion_date)), 1, 0))
+
+```
+
+
+```{r}
+writexl::write_xlsx(ingredient_data, "C://Users//Nick//Desktop//VA//GENCO-Misc//all_ndcs-2-3-2025.xlsx" )
+```
+
+```{r}
+test <- ndc_level_fin# %>% filter(!is.na(conversion_date))
+  #filter(ingredient == "CLOBAZAM" | ingredient == "ASENAPINE MALEATE" | ingredient == "APIXABAN" | ingredient == "MARAVIROC")
+```
+
+```{r}
+# Assign NDC based on first appearance per ingredient, taking the lowest NDC in case of ties
+new_appearance <- ndc_level_fin %>% 
+  group_by(ingredient, formulary_id) %>% 
+  arrange(date, ndc11) %>%  # Arrange by date first, then NDC to break ties
+  slice(1) %>%  # Select the first occurrence
+  distinct(ingredient, date, ndc11, formulary_id) %>% group_by(ingredient, date, ndc11) %>% summarize(unique_formularies = n_distinct(formulary_id))
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Aggregate data by date and NDC
+transformed_test <- test %>% distinct(ingredient, prior_authorization_yn, ndc11, formulary_id, date, conversion_date) %>% 
+  group_by(ingredient, date, ndc11, conversion_date) %>% 
+  dplyr::summarise(
+    num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Count where pauth_presence = 0
+    total_formularies = n_distinct(formulary_id),  # Count total formularies for that NDC and date
+    prop_pauth = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA) # Compute rounded proportion
+  ) %>% ungroup() %>% 
+  mutate(
+    formatted_value = ifelse(!is.na(prop_pauth),
+                             paste0(prop_pauth, " [", num_nopauth, "/", total_formularies, "]"), 
+                             NA),
+    ndc_short = substr(as.character(ndc11), nchar(as.character(ndc11)) - 6, nchar(as.character(ndc11))) # Extract last 5 digits
+  )
+
+
+transformed_test_tot <- test %>% distinct(ingredient, prior_authorization_yn, formulary_id, date, conversion_date) %>% 
+  group_by(ingredient, date, conversion_date) %>%
+  dplyr::summarise(
+    num_nopauth = sum(prior_authorization_yn == 0, na.rm = TRUE),  # Formularies with at least 1 NDC with pauth = 0.
+    total_formularies = n_distinct(formulary_id),  # Total unique formularies for that period. 
+    prop_pauth = ifelse(total_formularies > 0, round(num_nopauth / total_formularies, 2), NA) # Compute rounded proportion
+  ) %>% ungroup() %>% 
+  mutate(ndc = 0,
+    formatted_value = ifelse(!is.na(prop_pauth),
+                             paste0(prop_pauth, " [", num_nopauth, "/", total_formularies, "]"), 
+                             NA), 
+    ndc_short = "TOTAL")
+
+final_data <- bind_rows(transformed_test, transformed_test_tot)
+final_data <- left_join(final_data, new_appearance, by = c("ingredient", "date", "ndc11"))
+
+```
+
+```{r}
+wide_data <- final_data %>%
+  select(date, ingredient, ndc11, conversion_date, formatted_value) %>%
+  pivot_wider(
+    names_from = ndc11,
+    values_from = formatted_value,
+    names_glue = "ndc11{ndc11}"
+  )
+
+# Add Converted column (1 if date is on or after 6/30/2019, else 0)
+wide_data <- wide_data %>%
+  mutate(Converted = ifelse(date >= conversion_date, 1, 0))
+```
+```{r}
+writexl::write_xlsx(wide_data, "C://Users//Nick//Desktop//VA//GENCO-Misc//clobazam-example-1-29-2025.xlsx" )
+
+
+```
 ```{r}
 library(ggplot2)
-library(ggh4x)
-data = drug_appearance_stats %>% filter(ingredient == "ICATIBANT ACETATE" | ingredient == "PLERIXAFOR" | ingredient == "DALFAMPRIDINE" | ingredient == "SEMAGLUTIDE")
+# Create ggplot visualization
+final_data2 <- final_data %>% filter(ingredient %in% c("DESVENLAFAXINE SUCCINATE", "VILAZODONE HYDROCHLORIDE", "TOLVAPTAN", "TICAGRELOR
+", "TERIFLUNOMIDE")) 
+ggplot(final_data2, aes(x = date, y = as.factor(ndc_short))) +
+  # Red points for total formularies
+  geom_point(aes(size = total_formularies), color = "grey", alpha = 0.75) +
+  # Red points for total formularies
+  #geom_point(aes(size = unique_formularies), color = "darkgreen", alpha = 0.5) +
+  # Blue points for num_pauth (formularies with prior auth)
+  geom_text(aes(label = prop_pauth), color = "black", alpha = 1, size = 2) +
+  
+    geom_vline(
+    data = final_data2[!is.na(final_data2$conversion_date), ], 
+    aes(xintercept = as.numeric(conversion_date)), 
+    linetype = "dashed", 
+    color = "red"
+  )  + 
+  # Labels & theme
+  labs(
+    title = "NDC-Level Prior Authorization and Formularies Over Time for CLOBAZAM, ASENAPINE MALEATE, and APIXABAN",
+    x = "Date",
+    y = "NDC (Last 7 Digits) + TOTAL",
+    size = "Unique Formularies"
+  ) + facet_grid(rows = vars(ingredient), scales = "free_y")
+```
+```{r}
+library(ggplot2)
+final_data2 <- final_data %>% filter(ingredient %in% c("DESVENLAFAXINE SUCCINATE", "VILAZODONE HYDROCHLORIDE", "TOLVAPTAN", "TICAGRELOR
+", "TERIFLUNOMIDE") & ndc_short == "TOTAL") %>% mutate(conversion = if_else(conversion_date == date, "Yes", "No"))
+final_data2$ingredient = with(final_data2, reorder(ingredient, date))
+# Create ggplot visualization
+plot1 <- ggplot(final_data2, aes(x = date, y = as.factor(ingredient))) +
+  # Red points for total formularies
+  geom_point(aes(color = conversion), alpha = 0.5, size = 2) +
+  # Red points for total formularies
+  #geom_point(aes(size = unique_formularies), color = "darkgreen", alpha = 0.5) +
+  # Blue points for num_pauth (formularies with prior auth)
+  geom_text(aes(label = prop_pauth), color = "black", alpha = 1, size = 2) +
+  # Labels & theme
+  labs(
+    title = "Proportion of Formularies with Prior-auth free access",
+    x = "Date",
+    y = "Ingredients Converted to Generic",
+    color = "Conversion Period",
+  ) + scale_color_manual(values = c("grey", "red")) 
+```
+```{r}
+ggsave("Generic Conversion Plot.png", plot1,  height = 11, width = 8)
+```
+```{r}
+library(ggplot2)
+final_data2 <- final_data %>% 
+  filter(ndc_short == "TOTAL") %>% 
+  mutate(conversion = if_else(conversion_date == date, "Yes", "No"))
 
-p <- ggplot(data, aes(x = as.Date(date), y = interaction(as.factor(ndc), as.factor(app_no), as.factor(ingredient)))) +
-  geom_point(aes(x = as.Date(first_appearance), color = app_type)) +
-  geom_point(aes(x = as.Date(date_10_percent)), size = 2, shape = 49) +
-    geom_point(aes(x = as.Date(date_50_percent)), size = 2, shape = 53) +
+final_data2$ingredient = with(final_data2, reorder(ingredient, date))
 
-  geom_segment(aes(x = as.Date(first_appearance), xend = today()), alpha = 0.25, color = "black", size = 1) +
-  scale_y_discrete(guide = "axis_nested") +
+# Create heatmap visualization
+plot2 <- ggplot(final_data2, aes(x = date, y = as.factor(ingredient), fill = prop_pauth)) +
+  geom_tile(aes(alpha = prop_pauth), show.legend = NA) +  # Use opacity to reflect prop_pauth
+  geom_text(aes(label = if_else(conversion == "Yes", "|", "")), color = "red", size = 3) +  # Keep conversion date labels
+  # Labels & theme
+  labs(
+    title = "Prop of Formularies of Molecule Covering PAFree Drug",
+    x = "Date",
+    y = "Ingredients Converted to Generic",
+    fill = "Prop"
+  ) +
+  scale_fill_gradient(low = "white", high = "blue") +
+  scale_alpha(range = c(0.2, 1), guide = "none")  # Remove alpha legend
+```
+```{r}
+ggsave("Generic Conversion Plot - Heat map.png", plot2, height = 11, width = 8)
+```
+```{r}
 
-  labs(x = "Dates", y = "Ingredient, App No, NDC", title = "Drug Timeline Segments")
+# Aggregate data by date and NDC
+transformed_test_enrollment_share <- ndc_level_fin %>% distinct(ingredient, prior_authorization_yn, formulary_id, date, conversion_date, sum_enrollment_share) %>% filter(prior_authorization_yn == 0) %>%
+  group_by(ingredient, date, conversion_date) %>% 
+  dplyr::summarise(
+    num_ndcs = n_distinct(formulary_id),  # Count total formularies for that NDC and date
+    total_formularies = n_distinct(formulary_id),  # Count total formularies for that NDC and date
+    prop_average_monthly_enrollees_paf = sum(sum_enrollment_share)
+  ) %>% ungroup()
 
-ggsave("C://Users//Nick//Desktop//VA//GENCO-Misc//genco-timeline-11-19-2024.png", p, height = 20, width = 10)
+library(ggplot2)
+final_data3 <- transformed_test_enrollment_share %>% 
+  mutate(conversion = if_else(conversion_date == date, "Yes", "No"))
+
+final_data3$ingredient = with(final_data3, reorder(ingredient, date))
+```
+```{r}
+# Create heatmap visualization
+plot3 <- ggplot(final_data3, aes(x = date, y = as.factor(ingredient), fill = prop_average_monthly_enrollees_paf)) +
+  geom_tile(aes(alpha = prop_average_monthly_enrollees_paf), show.legend = NA) +  # Use opacity to reflect prop_pauth
+  geom_text(aes(label = if_else(conversion == "Yes", "|", "")), color = "red", size = 3) +  # Keep conversion date labels
+  # Labels & theme
+  labs(
+    title = "Prop All Monthly Enrollees w/ PAFree Drug Covered",
+    x = "Date",
+    y = "Ingredients Converted to Generic",
+    fill = "Prop"
+  ) +
+  scale_fill_gradient(low = "white", high = "purple4") +
+  scale_alpha(range = c(0.2, 1), guide = "none")  # Remove alpha legend
+
+plot3
+```
+```{r}
+ggsave("Generic Conversion Plot 2- Heat map.png", plot3, height = 11, width = 8)
 ```
 
-```{r, Find First Appearance for Every Ingredient at Plan Level}
-drug_appearance_stats_plan <- full %>% distinct(ingredient, app_type, app_no, rxcui, ndc, plan_id, segment_id, date) %>% mutate(plan_seg = paste(plan_id, "-", segment_id)) %>% 
-  group_by(ingredient, app_type, app_no, rxcui, ndc) %>% 
-  arrange(date) %>% 
-  summarize(
-    total_plans = n_distinct(plan_seg),
-    percentile_10_index = ceiling(0.10 * total_plans),
-    percentile_50_index = ceiling(0.50 * total_plans),
-    first_appearance = min(date),
-    date_10_percent = nth(date, percentile_10_index),
-    date_50_percent = nth(date, percentile_50_index),
-    date_100_percent = nth(date, total_plans)
+
+```{r}
+unique_ingredients <- data.frame(
+  ingredient = unique(final_data3$ingredient),
+  mol_id = seq_along(unique(final_data3$ingredient))  # Assign numeric IDs
+)
+
+## Left join person id back onto data
+model_dat <- left_join(final_data3, unique_ingredients, by = "ingredient")
+
+
+```
+
+```{r, Create Period and Conversion Period Varaible}
+model_dat <- model_dat %>%
+  mutate(date = as.Date(date),                  # Ensure date is in Date format
+         conversion_date = as.Date(conversion_date))  # Ensure conversion_date is in Date format
+
+# Define the start period
+start_period <- as.Date("2007-06-30")
+```
+```{r}
+# Calculate periods every six months
+model_dat <- mol_level_wide %>%
+  mutate(
+    period = as.integer((as.numeric(difftime(date, start_period, units = "days")) / 182.5)) + 1,  # Six-month intervals
+    conversion_period = ifelse(
+      !is.na(conversion_date),
+      as.integer((as.numeric(difftime(conversion_date, start_period, units = "days")) / 182.5)) + 1,
+      NA_integer_
     )
+  ) %>% arrange(ingredient, period)
 ```
 
 
 
+```{r}
+library(did)
+example_attgt <- att_gt(yname = "prop_average_monthly_enrollees_paf", #outcome
+                        tname = "period", #time
+                        idname = "mol_id", #molecule 
+                        gname = "conversion_period", 
+                        data = model_dat,
+                        control_group="notyettreated", #includes not-yet converted molecules in control group.
+                        allow_unbalanced_panel = TRUE, #don't balance panel with respect to time and id
+                        base_period= "varying" # varying base results in an estimate of ATT(g, t) being reported in the period immediately before treatment. 
+                                                )
 
+```
+
+```{r}
+data <- model_dat %>% select(mol_id, period, conversion_period, prop_average_monthly_enrollees_paf) %>% na.omit()
+Dtl <- sapply(-(max(data$period)-1):(max(data$period)-2), function(l) {
+    dtl <- 1*( (data$period == data$conversion_period + l) & (data$conversion_period > 0) )
+    dtl
+})
+
+Dtl <- as.data.frame(Dtl)
+cnames1 <- paste0("Dtmin", (max(data$period)-1):1)
+colnames(Dtl) <- c(cnames1, paste0("Dt", 0:(max(data$period)-2)))
+
+data <- cbind.data.frame(data, Dtl)
+row.names(data) <- NULL
+
+head(data)
+```
+```{r}
+# load plm package
+library(plm)
+
+# run event study regression
+# normalize effect to be 0 in pre-treatment period
+es <- plm(prop_average_monthly_enrollees_paf ~ Dtmin3 + Dtmin2 + Dt0 + Dt1 + Dt2, 
+          data = data, model = "within", effect = "twoways",
+          index = c("mol_id", "period"))
+
+summary(es)
+
+coefs1 <- coef(es)
+ses1 <- sqrt(diag(summary(es)$vcov))
+idx.pre <- 1:(max(data$period)-2)
+idx.post <- (max(data$period)-1):length(coefs1)
+coefs <- c(coefs1[idx.pre], 0, coefs1[idx.post])
+ses <- c(ses1[idx.pre], 0, ses1[idx.post])
+exposure <- -(max(data$period)-1):(max(data$period)-2)
+
+cmat <- data.frame(coefs=coefs, ses=ses, exposure=exposure)
+
+```
+```{r}
+library(ggplot2)
+
+ggplot(data = cmat, mapping = aes(y = coefs, x = exposure)) +
+  geom_line(linetype = "dashed") +
+  geom_point() + 
+  geom_errorbar(aes(ymin = (coefs-1.96*ses), ymax = (coefs+1.96*ses)), width = 0.2) +
+  ylim(c(-2, 5)) +
+  theme_bw()
+
+```
+
+```{r}
+es <- aggte(example_attgt, type = "dynamic", na.rm = T)
+#group_effects <- aggte(example_attgt, type = "group", na.rm = T)
+
+summary(example_attgt) # The P-value for pre-test of parallel trends assumption is for a Wald pre-test of the parallel trends assumption. Here the parallel trends assumption would not be rejected at conventional significance levels.
+summary(es)
+```
+
+```{r, Visualize}
+#ggdid(example_attgt) #This provides estimates of group-time average treatment effects for all groups in all time periods. Group-time average treatment effects are identified when t >= g (these are post-treatment time periods for each group), but summary reports them even in periods when t < g – these can be used to pre-test for the parallel trends assumption. 
+did::(es) #There are many cases where it is convenient to aggregate the group-time average treatment effects into a small number of parameters. 
+```
 
