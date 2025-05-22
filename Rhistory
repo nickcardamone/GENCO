@@ -1,0 +1,512 @@
+uniqueN(rhf_no_overlap$scrssn)
+rhf_no_overlap <- rhf_no_overlap %>% filter(dup_INP1 != 1)
+rhf_no_overlap %>% nrow()
+uniqueN(rhf_no_overlap$scrssn)
+rhf_no_overlap <- rhf_no_overlap %>% filter(dup_INP5 != 1)
+rhf_no_overlap %>% nrow()
+uniqueN(rhf_no_overlap$scrssn)
+rhf_no_overlap <- rhf_no_overlap %>% filter(dup_INP7 != 1)
+rhf_no_overlap %>% nrow()
+uniqueN(rhf_no_overlap$scrssn)
+# Will this method - of removing RHF-INP days on either end of a HOSP bias the results if LOS is a moderator of the outcome? Relative to the rest of the RHF setting dates are coded - I'm shortening the LOS of a HOSP. Might not matter.
+# This code absorbs:
+## 36,000 INP records going from HOSP date bandwidth from admission date to discharge date to admission date -1 to discharge date + 1
+## 46,000 from admission date to discharge date to admission date -5 to discharge date +5
+## 89,000 from admission date to discharge date to admission date -7 to discharge date +7
+View(rhf_no_overlap)
+# Connect to DB
+con <- dbConnect(odbc::odbc(), dsn="VHACDWRB03_17", timeout = 10)
+library(DBI) # Working with data in databases
+library(dbplyr) # Working with data in databases
+library(dplyr)
+library(data.table)
+library(comorbidity) #processing elixhauser data
+library(matrixStats)
+library(stringr) # string var manipulation
+library(arrow) #parquet files
+library(VINCI) # helper for accessing VINCI servers / databases
+library(tidyverse) # helper functions
+library(lubridate)
+library(janitor)
+library(readxl)
+library(openxlsx)
+library(future)
+library(tictoc)
+library(parquetize)
+library(table1)
+pghd_cohort <- open_dataset('parquet/cohort.parquet')%>% collect()
+# Load necessary packages
+library(rdrop2) # connect to dropbox
+library(httr)
+library(stringr)
+library(lubridate)
+library(haven)
+library(dplyr)
+library(tidyverse)
+library(xfun)
+library(data.table)
+library(arrow)
+## Part D data upload}
+# Define the path to the folder containing the .dta, .txt, and .zip files
+folder_path <- "P://ORD_Schwartz_202412057D//nick//GENCO//GENCO//part1//formulary_data//"
+# List all .dta, .txt, and .zip files in the folder that end with "with drug names"
+all_files <- list.files(folder_path, pattern = ".(dta|txt|zip)$", full.names = TRUE)
+# Process the list of drug files and extract dates
+names_df <- data.frame(
+name = basename(all_files)
+) %>%
+mutate(
+date = case_when(
+# Extract exact date in YYYYMMDD format
+str_detect(name, "\\d{8}") ~ str_extract(name, "\\d{8}"),
+# If the name contains a format like YYYY-12, convert it to YYYY1231
+str_detect(name, "\\d{4}-12") ~ str_replace(str_extract(name, "\\d{4}-12"), "-12", "1231"),
+# If no date is found, extract the year and append 0630
+str_detect(name, "\\d{4}") ~ paste0(str_extract(name, "\\d{4}"), "0630"),
+# Default NA if no date or year is found
+TRUE ~ NA_character_
+)
+)
+# Function to convert characters to numeric and back
+convert_to_numeric <- function(x) {
+as.numeric(as.factor(x))
+}
+convert_to_character <- function(x, original_values) {
+levels <- levels(as.factor(original_values))
+return(levels[x])
+}
+# Function to process each file based on the extracted date, with a sample of 50 observations
+process_file <- function(file_path, date_var) {
+# Print the name of the file being processed
+cat("Processing file:", basename(file_path), "\n")
+# Detect the file extension
+file_extension <- file_ext(file_path)
+# Unzip if the file is a .zip and get the contained .txt file
+if (file_extension == "zip") {
+temp_dir <- tempdir()
+unzip(file_path, exdir = temp_dir)
+txt_files <- list.files(temp_dir, pattern = "\\.txt$", full.names = TRUE)
+if (length(txt_files) == 0) {
+stop("No .txt file found in the zip archive")
+}
+file_path <- txt_files[1]  # Assuming you want to process the first .txt file found
+file_extension <- "txt"  # Update the extension to .txt for further processing
+}
+# Read the file based on its extension
+if (file_extension == "dta") {
+data <- read_dta(file_path)
+} else if (file_extension == "txt") {
+data <- read_delim(file_path, delim = "|", col_types = cols())  # Reading with pipe delimiter
+} else {
+stop("Unsupported file type")
+}
+# Convert all column names to lowercase
+names(data) <- tolower(names(data))
+# Check if 'rxcui', 'drugname', and 'labelname' columns exist, if not, add them with NA values
+if (!"rxcui" %in% names(data)) {
+data$rxcui <- NA
+}
+if (!"drugname" %in% names(data)) {
+data$drugname <- NA
+}
+# Convert to data.table if not already
+setDT(data)
+# Ensure consistent data types
+data[, `:=`(
+formulary_id = as.character(formulary_id),
+rxcui = as.character(rxcui),
+drugname = as.character(drugname),
+prior_authorization_yn = fifelse(as.character(prior_authorization_yn) == "Y", 1L, 0L),
+ndc = as.numeric(as.character(ndc)))
+]
+data[, `:=`(ndc_trimmed = substr(ndc, 1, nchar(ndc) - 2))] # Remove the last two digits from ndc11
+data[, `:=`(seg2 = substr(ndc_trimmed, nchar(ndc_trimmed) - 3, nchar(ndc_trimmed)))] # Extract the last 4 digits as seg2
+data[, `:=`(seg1 = substr(ndc_trimmed, 1, nchar(ndc_trimmed) - 4))] # Extract the remaining part as seg1
+data[, `:=`(seg1_padded = fifelse(nchar(seg1) < 5, sprintf("%04d", as.numeric(seg1)), as.character(seg1)))] # String pad seg1 to 4 characters if it is less than 5 characters
+data[, `:=`(PRODUCTNDC = paste(seg1_padded, seg2, sep = "-"))] # paste together segments to create the PRODUCTNDC variable
+# Convert the date string to Date type
+date_var <- as.Date(date_var, format = "%Y%m%d")
+# Select the required columns and add the "date" column
+data_selected <- data[, .(
+drugname,
+formulary_id,
+rxcui,
+PRODUCTNDC,
+prior_authorization_yn,
+# step_therapy_yn,
+# quantity_limit_yn,
+date = date_var
+)]
+}
+setwd("P://ORD_Schwartz_202412057D//nick//GENCO//GENCO//")
+# Apply the function to all files and combine the results into one data frame
+combined_data <- mapply(
+process_file,
+all_files,
+names_df$date,
+SIMPLIFY = FALSE
+) %>% bind_rows() %>%
+distinct(drugname, date, formulary_id, PRODUCTNDC, rxcui, prior_authorization_yn) %>%
+write_parquet("parquet/combined_data.parquet")
+#setwd("P://ORD_Schwartz_202412057D//nick//GENCO//GENCO//")
+#write_parquet(combined_data, "parquet/combined_data.parquet")
+combined_data <- open_dataset("parquet/combined_data.parquet") #%>% nrow()
+# Test if the same rxcui has different prior auth values for the same formulary in the same period.
+# Drop rows with NA in ndc, group by rxcui and formulary_id, and calculate mean
+pa_test = combined_data %>%
+filter(!is.na(PRODUCTNDC)) %>% collect() #%>%
+#group_by(rxcui, date, formulary_id) %>%
+#mutate(mpa = mean(prior_authorization_yn, na.rm = TRUE)) %>%
+#collect()
+# Load necessary packages
+library(rdrop2) # connect to dropbox
+library(httr)
+library(stringr)
+library(lubridate)
+library(haven)
+library(tidyverse)
+library(xfun)
+library(data.table)
+library(arrow)
+library(jsonlite)
+library(dplyr)
+library(pbapply)
+# Negate function
+'%!in%' <- function(x,y)!('%in%'(x,y))
+#folder_path <- "P://ORD_Schwartz_202412057D//nick//GENCO//GENCO//part1//formulary_data//"
+combined_data <- open_dataset("parquet/combined_data.parquet")
+all_ndcs  <- combined_data %>% select(PRODUCTNDC, rxcui) %>% distinct() %>% collect()
+all_rxcuis  <- combined_data %>% select(rxcui) %>% distinct() %>% collect()
+# No RXCUIs prior to 2010?
+na_rxcui_by_date <- combined_data %>% distinct(date, PRODUCTNDC, rxcui) %>%
+group_by(date) %>%
+summarize(n = n(), na_rxcui_count = sum(is.na(rxcui) | rxcui == "")) %>% collect()
+## Step 2. Process queried data
+# Read in data
+setwd("P://ORD_Schwartz_202412057D//nick//GENCO//GENCO//")
+# Load in molecule sample data (which was previously extracted from Drugs@FDA and cleaned in STATA by R. Gupta)
+long_mol <- read.csv("long_mol10-30-2024.csv")
+# NDC
+ndc_results_final <- readRDS("ndc_results_all.rds")
+ndc_results_final %>% select(id) %>% distinct() %>% nrow()
+# We queried 19,918 NDCs for an application number.
+ndc_results_final %>% filter(grepl("^(ANDA|NDA)[0-9]", appl_no)) %>%
+filter(appl_no != "NDA" & appl_no != "ANDA"& appl_no != "NDA AUTHORIZED GENERIC") %>% select(id) %>%
+distinct() %>% nrow()
+# Of which, 11,476 NDCs returned an ANDA or NDA.
+ndc_sample = ndc_results_final %>% filter(grepl("^(ANDA|NDA)[0-9]", appl_no)) %>%
+filter(appl_no != "NDA" & appl_no != "ANDA"& appl_no != "NDA AUTHORIZED GENERIC") %>%
+left_join(long_mol, by = "appl_no") %>%
+filter(!is.na(ingredient)) %>%
+select(id, appl_no) %>%
+distinct()
+ndc_sample %>% select(id) %>% nrow()
+ndc_sample_list = ndc_sample %>% select(id) %>% distinct() %>% pull(id)
+# Of which, 990 NDCs returned an ANDA or NDA that was in our sample.
+ndc_results_final %>%
+filter(grepl("^(BLA)[0-9]", appl_no)) %>%
+select(id) %>% distinct() %>% nrow()
+# Of which, 580 NDCs returned BLAs
+ndc_results_final %>% filter(!is.na(message)) %>% select(id, appl_no) %>% distinct() %>% nrow()
+ndc_not_found_list = ndc_results_final %>% filter(!is.na(message)) %>% select(id) %>% distinct() %>% pull(id)
+# Of which, 7,766 NDCs returned no application number
+# RXCUI
+rxcui_results_final <- readRDS("rxcui_results_all.rds")
+rxcui_results_final %>% select(id) %>% distinct() %>% nrow()
+# We queried 11,370 NDCs for an application number.
+rxcui_results_final %>% filter(grepl("^(ANDA|NDA)[0-9]", appl_no)) %>%
+filter(appl_no != "NDA" & appl_no != "ANDA"& appl_no != "NDA AUTHORIZED GENERIC") %>% select(id) %>%
+distinct() %>% nrow()
+# Of which, 6,628 NDCs returned an ANDA or NDA.
+rxcui_sample = rxcui_results_final %>% filter(grepl("^(ANDA|NDA)[0-9]", appl_no)) %>%
+filter(appl_no != "NDA" & appl_no != "ANDA"& appl_no != "NDA AUTHORIZED GENERIC") %>%
+left_join(long_mol, by = "appl_no") %>%
+filter(!is.na(ingredient)) %>%
+select(id, appl_no) %>%
+distinct()
+rxcui_sample %>% select(id) %>% nrow()
+# Of which, 888 NDCs returned an ANDA or NDA that was in our sample.
+rxcui_results_final %>%
+filter(grepl("^(BLA)[0-9]", appl_no)) %>%
+select(id) %>% distinct() %>% nrow()
+# Of which, 552 RXCUIs returned BLAs
+rxcui_results_final %>% filter(message == "No RXCUI propConcept found") %>% select(id, appl_no) %>% distinct() %>% nrow()
+rxcui_not_found_list = rxcui_results_final %>% filter(message == "No RXCUI propConcept found") %>% select(id) %>% distinct() %>% pull(id)
+# Of which, 3,410 NDCs returned no application number
+ndc_sample <- ndc_sample %>%
+mutate(appl_no = as.character(appl_no),
+PRODUCTNDC = as.character(id)) %>%
+select(appl_no, PRODUCTNDC)
+rxcui_sample <- rxcui_sample %>%
+mutate(rxcui = as.character(id)) %>%
+select(appl_no, rxcui)
+# Set Data.Table
+setDT(long_mol)
+setDT(ndc_sample)
+setDT(rxcui_sample)
+appl_no_xw <- all_ndcs %>% left_join(ndc_sample, "PRODUCTNDC")
+appl_no_xw <- appl_no_xw %>% left_join(rxcui_sample, "rxcui")
+appl_no_xw <- appl_no_xw %>% select(rxcui, PRODUCTNDC, appl_no.x, appl_no.y)
+setDT(appl_no_xw)
+appl_no_xw[, checkAppl_no := fcase(
+!is.na(appl_no.x) & !is.na(appl_no.y) & appl_no.x == appl_no.y, "Appl_Nos Match",
+is.na(appl_no.x) & !is.na(appl_no.y),                        "Appl_No found via RXCUI",
+!is.na(appl_no.x) & is.na(appl_no.y),                        "Appl_No found via NDC",
+!is.na(appl_no.x) & !is.na(appl_no.y) & appl_no.x != appl_no.y, "Appl_no do not Match",
+is.na(appl_no.x) & is.na(appl_no.y),                         "No appl_no found via RXCUI or NDC search"
+)]
+table(appl_no_xw$checkAppl_no)
+no_match = appl_no_xw %>% filter(checkAppl_no == "Appl_no do not Match")
+# Join ingredient data on appl_no returned by NDC list
+long_mol_test <- long_mol %>% select(ingredient, appl_no)
+long_mol_test[, appl_no.x := as.character(appl_no)]
+long_mol_test <- long_mol_test[, .(ingredient, appl_no.x)]
+setDT(long_mol_test)
+appl_no_xw <- appl_no_xw %>% left_join(long_mol_test, "appl_no.x")
+# Join ingredient data on appl_no returned by RXCUI list
+long_mol_test[, appl_no.y := as.character(appl_no.x)]
+long_mol_test <- long_mol_test[, .(ingredient, appl_no.y)]
+ing_xw <- appl_no_xw %>% left_join(long_mol_test, "appl_no.y")
+setDT(ing_xw)
+ing_xw[, checkIngredient := fcase(
+!is.na(ingredient.x) & !is.na(ingredient.y) & ingredient.x == ingredient.y, "Included: Ingredients match",
+is.na(ingredient.x) & !is.na(ingredient.y),                               "Included: Ingredient found via RXCUI",
+!is.na(ingredient.x) & is.na(ingredient.y),                               "Included: Ingredient found via NDC",
+!is.na(ingredient.x) & !is.na(ingredient.y) & ingredient.x != ingredient.y, "Included: Ingredients do not Match",
+is.na(ingredient.x) & is.na(ingredient.y),                                "Not included: ingredient not in list"
+)]
+table(ing_xw$checkIngredient) # Confirms that "Included: Ingredients do not Match" = 0
+# Sample of ingredients list
+ingredients_list <- ing_xw %>%
+mutate(ingredient = coalesce(ingredient.x, ingredient.y)) %>% # take first non-NA ingredient name (most rows have both because both the NDC and rxcui source had it)
+select(ingredient) %>%
+mutate(in_sample = 1) %>%
+distinct()
+ingredients_list %>% nrow()
+# 332 out of #474 in our sample.
+xw_full <- ing_xw %>%
+filter(checkIngredient %in% c("Included: Ingredients match", "Included: Ingredient found via RXCUI", "Included: Ingredient found via NDC")) %>%
+mutate(ingredient = coalesce(ingredient.x, ingredient.y)) %>%
+select(rxcui, PRODUCTNDC, ingredient)
+xw_ndc <- xw_full %>% select(ingredient, PRODUCTNDC) %>% distinct() %>% drop_na()
+xw_rxcui = xw_full %>% select(ingredient, rxcui) %>% distinct() %>% drop_na()
+combined_data1 <- test %>%
+mutate(ingredient = coalesce(ingredient.x, ingredient.y)) %>%
+select(ingredient, date, formulary_id, PRODUCTNDC, rxcui, prior_authorization_yn) %>%
+drop_na(ingredient) %>%
+distinct()
+test <- combined_data %>%
+select(date, formulary_id, PRODUCTNDC, rxcui, prior_authorization_yn) %>%
+collect() %>%
+left_join(xw_rxcui, by = "rxcui") %>%
+left_join(xw_ndc, by = "PRODUCTNDC")
+combined_data1 <- test %>%
+mutate(ingredient = coalesce(ingredient.x, ingredient.y)) %>%
+select(ingredient, date, formulary_id, PRODUCTNDC, rxcui, prior_authorization_yn) %>%
+drop_na(ingredient) %>%
+distinct()
+combined_data1 %>% write_parquet('parquet/combined_data1.parquet')
+long_mol %>% select(ingredient) %>% distinct() %>% nrow()
+combined_data1 %>% select(ingredient) %>% distinct() %>% nrow()
+library(dplyr)
+library(writexl)
+library(arrow)
+combined_data <- open_dataset("parquet/combined_data.parquet")
+## Missingness Test ##
+## For which drugs in the formulary data are we missing rows?
+## Rows with NDCs & RXCUIs that both returned no appl_no or rows with RXCUI that returned no appl_no.
+misschk <- combined_data %>%
+filter((PRODUCTNDC %in% ndc_not_found_list & rxcui %in% rxcui_not_found_list) |
+(is.na(PRODUCTNDC) & rxcui %in% rxcui_not_found_list)) %>%
+select(drugname, date, PRODUCTNDC, rxcui, formulary_id, prior_authorization_yn) %>%
+distinct() %>% collect()
+molecules = long_mol %>% select(ingredient) %>% mutate(ingredient = as.character(ingredient)) %>% distinct() %>% pull(ingredient)
+trade_names = long_mol %>% select(trade_name)%>% mutate(trade_name = as.character(trade_name)) %>% distinct() %>% pull(trade_name)
+search_terms = c(molecules, trade_names)
+words = data.frame(word = search_terms)
+# Do fuzzy string matching to try and detect any ingredients / trade names among the drug name column in the fomrulary data.
+misschk_str <- misschk %>% filter(!is.na(drugname)) %>%
+select(drugname, date, PRODUCTNDC, rxcui, prior_authorization_yn) %>% distinct() %>%
+#  tidytext::unnest_tokens(output = "word", input = "drugname", drop = FALSE) %>%
+fuzzyjoin::stringdist_inner_join(words, by = c("drugname" = "word"), max_dist = 1)
+# There aren't any near mis-spellings so we can just do this:
+missed = misschk %>%
+filter(drugname %in% trade_names) %>%
+left_join(long_mol %>% select(ingredient, trade_name) %>% distinct(), by = c("drugname" = 'trade_name'))
+# Rows missed for each drug.
+cnt0 = missed %>% group_by(ingredient, drugname) %>% summarise(rows_missing = n(),
+min_date = min(date, na.rm = T),
+max_date = max(date, na.rm = T))
+# Missingness by period
+cnt1 = missed %>% group_by(ingredient, date) %>% summarise(rows_missing = n())
+# Distinct NDCs missing.
+cnt2 = missed %>% distinct(ingredient, date, PRODUCTNDC) %>% group_by(ingredient, date) %>%
+summarise(NDC = n())
+# Distinct formularies with missing data:
+cnt3 = missed %>% distinct(ingredient, date, formulary_id) %>% group_by(ingredient, date) %>%
+summarise(formularies = n())
+# NDCs with number of formularies they're missing in:
+cnt4 = missed %>%
+group_by(ingredient) %>%
+mutate(ndc_no = dense_rank(PRODUCTNDC)) %>%
+group_by(ingredient, date, ndc_no) %>%
+summarise(formularies = n()) %>% pivot_wider(names_from = "ndc_no", values_from = "formularies", names_prefix = "missed_ndc_")
+missed_ing = missed %>% select(ingredient) %>% distinct() %>% mutate(exists = 1)
+tst = combined_data1 %>%
+inner_join(missed_ing, by= "ingredient") %>%
+collect() %>%
+group_by(ingredient) %>%
+mutate(ndc_no = dense_rank(PRODUCTNDC)) %>%
+group_by(ingredient, date, ndc_no) %>%
+summarise(formularies = n()) %>%
+pivot_wider(names_from = "ndc_no", values_from = "formularies", names_prefix = "found_ndc_")
+cnt5 = tst %>% full_join(cnt, by = c("ingredient", "date"))
+cnt5 = tst %>% full_join(cnt4, by = c("ingredient", "date"))
+View(cnt5)
+# Create tables.
+write_xlsx(list(Sheet1 = cnt0,
+Sheet2 = cnt1,
+Sheet3 = cnt2,
+Sheet4 = cnt3,
+Sheet5 = cnt4,
+Sheet6 = cnt5),
+"missingness_check-5-20-2025.xlsx")
+combined_data1 %>% select(formulary_id) %>% distinct() %>% collect() %>% nrow()
+# Load necessary packages
+library(rdrop2) # connect to dropbox
+library(httr)
+library(stringr)
+library(lubridate)
+library(haven)
+library(tidyverse)
+library(xfun)
+library(data.table)
+library(arrow)
+library(jsonlite)
+library(dplyr)
+library(pbapply)
+library(readr) # reading in different data types
+library(tools) # utility
+library(devtools) # utility
+# Load formulary data
+combined_data1 <- open_dataset('parquet/combined_data1.parquet')
+# Load ingredient data
+long_mol <- open_dataset('parquet/long_mol.parquet') %>% collect()
+# Load enrollment data
+enrollmentlj <- open_dataset('parquet/plan_enrollment.parquet')
+## Create Enrollment Share Values
+# Create formulary-level enrollment variable.
+# Count number of distinct plans and number of plans missing enrollment data.
+formulary_enrollmentshare <- enrollmentlj %>% collect %>%
+group_by(formulary_id, date) %>%
+dplyr::summarise(sum_enrollment_share = round(sum(avg_enrollment_weight, na.rm = T), 5),
+plans = n_distinct(plan_id, contract_id, segment_id),
+plans_missing_enrollment = sum(is.na(avg_enrollment_weight))) %>% distinct()
+## Join Enrollment Data to Part D (NDC) dataset}
+formulary_outcomes <- combined_data1 %>%
+collect() %>%
+group_by(ingredient, formulary_id, date) %>%
+summarise(min_pa = min(prior_authorization_yn, na.rm = T), # if at least
+ndc = n(),
+ndc_pa_free = sum(prior_authorization_yn == 0, na.rm = TRUE),
+ndc_pa = sum(prior_authorization_yn == 1, na.rm = TRUE),
+prop_ndc_pa_free = ndc_pa_free/ndc,
+prop_ndc_pa = ndc_pa/ndc
+) %>% mutate(
+any_pa_free = if_else(min_pa == 0, 1, 0),
+pa_only = if_else(min_pa == 1, 1, 0),
+) %>%
+left_join(formulary_enrollmentshare, by = c("formulary_id", "date"))
+# Ingredient level outcomes (ingredient-date)
+ingredient_outcomes <- formulary_outcomes %>%
+group_by(ingredient, date) %>%
+summarise(formularies_pa_free = sum(any_pa_free == 1, na.rm = TRUE),
+formularies_pa_only = sum(pa_only == 1, na.rm = TRUE),
+formularies = n(),
+prop_formularies_pa_free = formularies_pa_free/formularies,
+prop_formularies_pa_only = formularies_pa_only/formularies,
+sum_formulary_enrollmentshare = sum(sum_enrollment_share, na.rm = T)
+) %>% left_join(long_mol, by= "ingredient")
+ingredient_outcomes %>%
+filter(generic == 1) %>%
+ggplot(aes(x=as.Date(date), y= ingredient, alpha = prop_formularies_pa_free)) +
+geom_tile(fill = "blue1") +
+labs(y="Ingredient", x= "Date") + scale_x_date() +theme_minimal()
+## Join Enrollment Data to Part D (NDC) dataset}
+formulary_outcomes <- combined_data1 %>%
+collect() %>%
+group_by(ingredient, formulary_id, date) %>%
+summarise(min_pa = min(prior_authorization_yn, na.rm = T), # if at least
+ndc = n(),
+ndc_pa_free = sum(prior_authorization_yn == 0, na.rm = TRUE), # count NDCs with PA == 0
+ndc_pa = sum(prior_authorization_yn == 1, na.rm = TRUE),
+prop_ndc_pa_free = ndc_pa_free/ndc,
+prop_ndc_pa = ndc_pa/ndc
+) %>% mutate(
+any_pa_free = if_else(ndc_pa_free > 0, 1, 0),
+pa_only = if_else(ndc_pa_free == 0, 1, 0),
+) %>%
+left_join(formulary_enrollmentshare, by = c("formulary_id", "date"))
+View(missed)
+table(missed$drugname)
+View(missed)
+table(mischkd$drugname)
+table(misschkd$drugname)
+table(misschk$drugname)
+View(long_mol)
+View(long_mol_test)
+View(long_mol)
+long_mol_excl <- long_mol %>% filter(ingredients %nin% ingredients)
+'%!in%' <- function(x,y)!('%in%'(x,y))
+long_mol_excl <- long_mol %>% filter(ingredients %!in% ingredients)
+long_mol_excl <- long_mol %>% filter(ingredient %!in% ingredients)
+long_mol_excl <- long_mol %>% filter(ingredient %!in% ingredients_list$ingredient)
+View(long_mol_excl)
+long_mol <- read.csv("long_mol10-30-2024.csv")
+View(long_mol)
+View(long_mol_excl)
+View(rxcui_sample)
+View(rxcui_results_final)
+View(all_rxcuis)
+View(all_ndcs)
+View(long_mol)
+View(long_mol_excl)
+View(long_mol)
+View(all_ndcs)
+View(misschk)
+View(all_rxcuis)
+View(misschk)
+noname <- misschk %>% filter(drugname == "")
+View(noname)
+table(noname$date)
+View(rxcui_results_final)
+View(all_rxcuis)
+View(ndc_results_final)
+table(rxcui_results_final$message)
+table(ndc_results_final$message)
+View(na_rxcui_by_date)
+View(rxcui_results_final)
+View(missed)
+View(misschk_str)
+View(missed_ing)
+library(dplyr)
+library(writexl)
+library(arrow)
+combined_data <- open_dataset("parquet/combined_data.parquet")
+## Missingness Test ##
+## For which drugs in the formulary data are we missing rows?
+## Rows with NDCs & RXCUIs that both returned no appl_no or rows with RXCUI that returned no appl_no.
+misschk <- combined_data %>%
+filter((PRODUCTNDC %in% ndc_not_found_list & rxcui %in% rxcui_not_found_list) |
+(is.na(PRODUCTNDC) & rxcui %in% rxcui_not_found_list)) %>%
+select(drugname, date, PRODUCTNDC, rxcui, formulary_id, prior_authorization_yn) %>%
+distinct() %>% collect()
+long_mol <- read.csv("long_mol10-30-2024.csv")
+## Missingness Test ##
+## For which drugs in the formulary data are we missing rows?
+## Rows with NDCs & RXCUIs that both returned no appl_no or rows with RXCUI that returned no appl_no.
+misschk <- combined_data %>%
+filter((PRODUCTNDC %in% ndc_not_found_list & rxcui %in% rxcui_not_found_list) |
+(is.na(PRODUCTNDC) & rxcui %in% rxcui_not_found_list)) %>%
+select(drugname, date, PRODUCTNDC, rxcui, formulary_id, prior_authorization_yn) %>%
+distinct() %>% collect()
