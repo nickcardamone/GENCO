@@ -129,5 +129,16 @@ Use 2007–2023 Part D formulary files for stand-alone Medicare Part D and Medic
 10. Create final model data, including a “conversion date” variable—period where generic NDCs reach 10% of the formularies they will ever appear in.
 
 ---
+### Glossary:
+ * RxNorm: System for normalizing names for clinical drugs.
+ * RxNav: Online browser for RxNorm database
+ * RxMix: Local, web-based interface for RxNorm API
+ * NDC: National Drug Code, FDA regulated label on all marketed drugs that is unique to the manufacturer, product, and package size.
+ * NDA number: New Drug Application Number – identifier of the application submitted to the FDA to request drug approval.
+ * ANDA number: Abbreviated New Drug Application Number – identifier of the application submitted to the FDA to request generic drug approval.
+ * NDC: National Drug Code, FDA regulated label on all marketed drugs that is unique to the manufacturer, product, and package size.
+
+
+---
 
 <sub>*Numbers are approximate and marked for review</sub>
