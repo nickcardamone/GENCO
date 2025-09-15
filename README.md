@@ -98,10 +98,10 @@ Use 2007–2023 Part D formulary files for stand-alone Medicare Part D and Medic
     6. Result: Dataset with unique NDC, conceptName, marketing category, and application number.
 
 ### 4. Aggregate Ingredient Data
-    1. Create feature cumulative reformulations for ingredient over time 
-    2. Create dataset with generic version information
-    3. Add period of branded/generic approval
-    4. Save to parquet file
+1. Create feature cumulative reformulations for ingredient over time 
+2. Create dataset with generic version information
+3. Add period of branded/generic approval
+4. Save to parquet file
 
 ### 5. Plan Crosswalk (XW) and Enrollment
 
