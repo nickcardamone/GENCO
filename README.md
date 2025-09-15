@@ -97,13 +97,13 @@ Use 2007–2023 Part D formulary files for stand-alone Medicare Part D and Medic
     5. Join all NDCs (`ndc_ndc`, n=22,884) with marketing category (`ndc_mc`, n=19,635) and NDA/ANDA (`ndc_appl`, n=18,352).
     6. Result: Dataset with unique NDC, conceptName, marketing category, and application number.
 
-#### Aggregate Ingredient Data
-- Feature: cumulative reformulations per ingredient over time
-- Dataset: generic version information
-- Add: branded/generic approval periods
-- Save: to parquet file
+### 4. Aggregate Ingredient Data
+    1. Create feature cumulative reformulations for ingredient over time 
+    2. Create dataset with generic version information
+    3. Add period of branded/generic approval
+    4. Save to parquet file
 
-### 4. Plan Crosswalk (XW) and Enrollment
+### 5. Plan Crosswalk (XW) and Enrollment
 
 1. Download and combine all plan-by-period formulary files.
 2. Webscrape CMS plan enrollment data by month.
@@ -113,7 +113,7 @@ Use 2007–2023 Part D formulary files for stand-alone Medicare Part D and Medic
 6. Join to formulary-level prior authorization data:
     - Organized as ingredient > application number (branded/generic) > RxCUI > NDC > formulary > period.
 
-### 5. Join Datasets & Analyze
+### 6. Join Datasets & Analyze
 
 1. Load prior auth/formulary data; pad leading zeroes in formulary IDs to match enrollment data.
 2. Load enrollment data (`plan_id`, `date`, `enrollment`, `total_enrollment`)
