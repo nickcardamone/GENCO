@@ -27,8 +27,8 @@ Use 2007–2023 Part D formulary files for stand-alone Medicare Part D and Medic
 
 ### A. FDA Approved Drugs
 - **Accessed from:** [FDA Drug Approval Database](https://www.accessdata.fda.gov/scripts/cder/daf/index.cfm)
-- **Downloaded date:** ?
-- **Accessed date:** ?
+- **Downloaded date:** June 6th, 2024
+- **Accessed date:** June 6th, 2024
 - **Years:** 2007–2024
 - **Description:**
     - Unique application numbers: 1,021*
