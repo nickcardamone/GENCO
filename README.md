@@ -80,6 +80,7 @@ Use 2007–2023 Part D formulary files for stand-alone Medicare Part D and Medic
 - Finds and downloads files starting with "basic drugs formulary".
 
 ### 2. Process Formulary Data (`Process Formulary Data.R`)
+- Important: Put all formulary files into a folder locally.
 - Lists all `.dta`, `.txt`, and `.zip` files ending with "with drug names".
 - Extracts dates, processes each file by date, and combines into a single data frame with:
     - `drugname`, `formulary_id`, `rxcui`, `ndc11_str`, `ndc_raw`, `PRODUCTNDC`, `prior_authorization_yn`, `tier_level_value`, `step_therapy_yn`, `quantity_limit_yn`, `quantity_limit_amount`, `quantity_limit_days`, `date`
