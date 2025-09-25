@@ -25,7 +25,7 @@ library(arrow)         # Efficient file storage (parquet format)
 ## --- Part D Data Upload ---
 
 # Define the local directory where the input files are stored
-folder_path <- "P://ORD_Schwartz_202412057D//nick//GENCO//GENCO//part1//formulary_data//"
+folder_path <- "part1//formulary_data//"
 
 # List all input files ending in .dta, .txt, or .zip that reference 'drug names'
 all_files <- list.files(folder_path, pattern = ".(dta|txt|zip)$", full.names = TRUE)
@@ -168,3 +168,4 @@ combined_data <- mapply(
     quantity_limit_days
   ) %>%                             # Remove duplicate rows based on these key columns
   write_parquet("parquet/combined_formulary_data.parquet")  # Save as parquet for efficient storage and downstream use
+
