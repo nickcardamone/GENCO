@@ -86,7 +86,7 @@ lapply(x$matches, download_function)
 # =====================================================
 # -- Place downloaded files in your "plan" directory.
 
-folder_path <- "YOUR PATH"  # <-- Set your directory here
+folder_path <- "inputs/plan"  # <-- Set your directory here
 
 # List all .dta, .txt, .zip files ending with "with drug names"
 all_files <- list.files(folder_path, pattern = ".(dta|txt|zip)$", full.names = TRUE)
@@ -161,8 +161,8 @@ combined_plan_data <- combined_plan_data %>%
   distinct()
 
 # Append new (2025) to old (2024) plan-formulary data if needed
-combined_plan_data_old <- read.csv("input/combined_plan_data_n=134198-10-31-2024.csv")
-combined_plan_data_new <- read.csv("combined_plan_data_n=134198-5-30-2025.csv")
+combined_plan_data_old <- read.csv("inputs/combined_plan_data_n=134198-10-31-2024.csv")
+combined_plan_data_new <- read.csv("inputs/combined_plan_data_n=134198-5-30-2025.csv")
 
 combined_plan_data <- rbind(combined_plan_data_old, combined_plan_data_new) %>% 
   mutate(formulary_id = str_pad(formulary_id, 8, pad = "0")) %>%
@@ -229,7 +229,7 @@ result <- data.frame(main_page_link = links, subsequent_page_link = subsequent_l
 # Download all zip files to local directory
 root_url <- "https://www.cms.gov"
 full_subsequent_links <- paste0(root_url, subsequent_links)
-local_directory <- "input/enrollment/"
+local_directory <- "inputs/enrollment/"
 
 if (!dir.exists(local_directory)) dir.create(local_directory, recursive = TRUE)
 
@@ -254,14 +254,14 @@ download_zip_file_with_timeout <- function(zip_url, save_dir, timeout_secs = 300
 }
 downloaded_files <- map(full_subsequent_links, ~ download_zip_file_with_timeout(.x, local_directory))
 
-# MANUAL STEP: Unzip all .txt files (e.g., using 7-Zip) into "input/enrollment/"
+# MANUAL STEP: Unzip all .txt files (e.g., using 7-Zip) into "inputs/enrollment/"
 
 # =====================================================
 # 4. CLEAN & AGGREGATE ENROLLMENT DATA
 # =====================================================
 # -- Process all unzipped monthly enrollment CSVs
 
-folder_path <- "input/enrollment/"
+folder_path <- "inputs/enrollment/"
 all_csv_files <- list.files(folder_path, 
                             pattern = "^(Monthly_Report_By_Plan|monthly report by plan).*\\.csv$", 
                             full.names = TRUE, 
@@ -299,10 +299,10 @@ process_enrollment_file <- function(file_path, date_var) {
 all_data <- purrr::map2_dfr(all_csv_files, names_df$date, process_enrollment_file)
 
 # Append new to old enrollment data if needed
-enrollment_old <- read.csv("input/part3-all-enrollment-data-1-7-2025.csv") %>% 
+enrollment_old <- read.csv("inputs/part3-all-enrollment-data-1-7-2025.csv") %>% 
   mutate(plan_id = as.character(plan.id)) %>% 
   select(-plan.id)
-enrollment_new <- read.csv("input/part3-all-enrollment-data-5-30-2025.csv")
+enrollment_new <- read.csv("inputs/part3-all-enrollment-data-5-30-2025.csv")
 enrollment <- rbind(enrollment_old, enrollment_new)
 
 # Filter and clean: keep only Part D, drop missing, standardize fields
@@ -347,3 +347,4 @@ write_parquet(enrollment_period, 'parquet/enrollment_period.parquet')
 # =====================================================
 # END OF SCRIPT
 # =====================================================
+
