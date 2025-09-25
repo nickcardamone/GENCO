@@ -1,99 +1,97 @@
-#Title: 2.Process Formulary Data
-#Author: "Nicholas Cardamone"
-#Created: "5/9/2025"
+# Title: 2.Process Formulary Data
+# Author: "Nicholas Cardamone"
+# Created: "5/9/2025"
 
-#Goal: Use 2007-2023 Part D formulary files for stand-alone Medicare Part D and Medicare Advantage prescription drug plans 
+# Goal: Use 2007-2023 Part D formulary files for stand-alone Medicare Part D and Medicare Advantage prescription drug plans 
 # to identify plans’ use of prior authorization, quantity limits, and step therapy for each unique brand-generic-dose-formulary combination 
 # (‘molecule’) of orally administered drugs in each year after NME approval
 
-# What this code does:
-# 1. The files have different formats (.dta vs. .txt vs. .zip) so the code will clean them in different ways depending on what format they're in. Then it will smash the datasets together.
+# This script:
+# 1. Handles multiple input formats (.dta, .txt, .zip) and processes them according to type
+# 2. Standardizes and cleans the data, then combines all years into a single dataset for downstream analysis
 
-# Load necessary packages
-library(rdrop2) # connect to dropbox
-library(httr) # webscraping
-library(stringr) # process string variables
-library(lubridate) # process date variables
-library(haven) # read files of variosu formats
-library(dplyr) # data manipulation
-library(tidyverse) # data manipulation
-library(xfun) # misc functions
-library(data.table) # working with big data
-library(arrow) # working with big data
+# Load dependencies for file IO, data manipulation, and string/date handling
+library(rdrop2)        # Interface with Dropbox
+library(httr)          # For web scraping (not explicitly used here)
+library(stringr)       # String manipulation functions
+library(lubridate)     # Date and time processing
+library(haven)         # Read files in various formats, especially Stata (.dta)
+library(dplyr)         # Data manipulation
+library(tidyverse)     # Collection of core data science packages
+library(xfun)          # Miscellaneous utility functions
+library(data.table)    # Fast data manipulation, especially for large datasets
+library(arrow)         # Efficient file storage (parquet format)
 
-## Part D data upload}
-# Define the path to the folder containing the .dta, .txt, and .zip files
+## --- Part D Data Upload ---
+
+# Define the local directory where the input files are stored
 folder_path <- "P://ORD_Schwartz_202412057D//nick//GENCO//GENCO//part1//formulary_data//"
 
-# List all .dta, .txt, and .zip files in the folder that end with "with drug names"
+# List all input files ending in .dta, .txt, or .zip that reference 'drug names'
 all_files <- list.files(folder_path, pattern = ".(dta|txt|zip)$", full.names = TRUE)
 
-# Process the list of drug files and extract dates
+# Create a dataframe with file paths and extracted metadata (including the date)
 names_df <- data.frame(
   file_path = all_files,
   name = basename(all_files)
 ) %>%
   mutate(
+    # Extract date information from filenames using regex
     date = case_when(
-      # Extract exact date in YYYYMMDD format
-      str_detect(name, "\\d{8}") ~ str_extract(name, "\\d{8}"),
-      
-      # If the name contains a format like YYYY-12, convert it to YYYY1231
-      str_detect(name, "\\d{4}-12") ~ str_replace(str_extract(name, "\\d{4}-12"), "-12", "1231"),
-      
-      # If no date is found, extract the year and append 0630
-      str_detect(name, "\\d{4}") ~ paste0(str_extract(name, "\\d{4}"), "0630"),
-      
-      # Default NA if no date or year is found
-      TRUE ~ NA_character_
+      str_detect(name, "\\d{8}") ~ str_extract(name, "\\d{8}"),                 # Use YYYYMMDD if found
+      str_detect(name, "\\d{4}-12") ~ str_replace(str_extract(name, "\\d{4}-12"), "-12", "1231"), # Convert YYYY-12 to YYYY1231
+      str_detect(name, "\\d{4}") ~ paste0(str_extract(name, "\\d{4}"), "0630"), # Use June 30 if only year is found
+      TRUE ~ NA_character_   # Assign NA if date not found
     )
-  ) %>% arrange(desc(date))
+  ) %>% arrange(desc(date)) # Sort by date descending
 
-# Function to convert characters to numeric and back
+# --- Helper functions ---
+
+# Convert categorical to numeric (using factor levels)
 convert_to_numeric <- function(x) {
   as.numeric(as.factor(x))
 }
 
+# Convert numeric back to original categorical values using supplied reference
 convert_to_character <- function(x, original_values) {
   levels <- levels(as.factor(original_values))
   return(levels[x])
 }
 
-# Function to process each file based on the extracted date
+# --- Main file processing function ---
+
 process_file <- function(file_path, date_var) {
-  # Print the name of the file being processed
+  # Print progress for tracking
   cat("Processing file:", basename(file_path), "\n")
   
-  # Detect the file extension
+  # Get file extension/type
   file_extension <- file_ext(file_path)
   
-  # Unzip if the file is a .zip and get the contained .txt file
+  # If file is a .zip, unzip and grab the first .txt file inside
   if (file_extension == "zip") {
     temp_dir <- tempdir()
     unzip(file_path, exdir = temp_dir)
     txt_files <- list.files(temp_dir, pattern = "\\.txt$", full.names = TRUE)
-    
     if (length(txt_files) == 0) {
       stop("No .txt file found in the zip archive")
     }
-    
-    file_path <- txt_files[1]  # Assuming you want to process the first .txt file found
-    file_extension <- "txt"  # Update the extension to .txt for further processing
+    file_path <- txt_files[1]   # Use first .txt file found
+    file_extension <- "txt"     # Update extension for next steps
   }
   
-  # Read the file based on its extension
+  # Read the file according to type
   if (file_extension == "dta") {
     data <- read_dta(file_path)
   } else if (file_extension == "txt") {
-    data <- read_delim(file_path, delim = "|", col_types = cols())  # Reading with pipe delimiter
+    data <- read_delim(file_path, delim = "|", col_types = cols())  # Pipe-delimited text
   } else {
     stop("Unsupported file type")
   }
   
-  # Convert all column names to lowercase
+  # Standardize all column names to lower case for consistency
   names(data) <- tolower(names(data))
   
-  # Check if 'rxcui', 'drugname', and 'labelname' columns exist, if not, add them with NA values
+  # If certain columns are missing, add them as NA for uniformity
   if (!"rxcui" %in% names(data)) {
     data$rxcui <- NA
   }
@@ -101,31 +99,31 @@ process_file <- function(file_path, date_var) {
     data$drugname <- NA
   }
   
-  # Convert to data.table if not already
+  # Convert to data.table (if not already), for fast efficient manipulation
   setDT(data)
   
-  # Ensure consistent data types
+  # Enforce consistent data types, handle missing columns, and create standardized NDC variables
   data[, `:=`(
     formulary_id = as.character(formulary_id),
     rxcui = as.character(rxcui),
     drugname = as.character(drugname),
-    prior_authorization_yn = fifelse(as.character(prior_authorization_yn) == "Y", 1L, 0L),
+    prior_authorization_yn = fifelse(as.character(prior_authorization_yn) == "Y", 1L, 0L), # Convert Yes/No to 1/0
     ndc_raw = as.character(ndc),
-    ndc11_str = str_pad(ndc, 11, pad = "0"),
-    ndc = as.numeric(as.character(ndc)))
-    ]
-
-  # Cleaning the NDC variable to make it compatible for later joining.
-  data[, `:=`(ndc_trimmed = substr(ndc, 1, nchar(ndc) - 2))] # Remove the last two digits from ndc11
-  data[, `:=`(seg2 = substr(ndc_trimmed, nchar(ndc_trimmed) - 3, nchar(ndc_trimmed)))] # Extract the last 4 digits as seg2 
-  data[, `:=`(seg1 = substr(ndc_trimmed, 1, nchar(ndc_trimmed) - 4))] # Extract the remaining part as seg1
-  data[, `:=`(seg1_padded = fifelse(nchar(seg1) < 5, sprintf("%05d", as.numeric(seg1)), as.character(seg1)))] # String pad seg1 to 4 characters if it is less than 5 characters
-  data[, `:=`(PRODUCTNDC = paste(seg1_padded, seg2, sep = "-"))] # paste together segments to create the PRODUCTNDC variable
+    ndc11_str = str_pad(ndc, 11, pad = "0"),   # Pad NDC to 11 digits
+    ndc = as.numeric(as.character(ndc))
+  )]
   
-  # Convert the date string to Date type
+  # Clean and split NDC as needed for future joins
+  data[, `:=`(ndc_trimmed = substr(ndc, 1, nchar(ndc) - 2))]  # Remove last two digits for 9-digit NDC
+  data[, `:=`(seg2 = substr(ndc_trimmed, nchar(ndc_trimmed) - 3, nchar(ndc_trimmed)))]  # Last 4 digits (segment 2)
+  data[, `:=`(seg1 = substr(ndc_trimmed, 1, nchar(ndc_trimmed) - 4))]                   # First digits (segment 1)
+  data[, `:=`(seg1_padded = fifelse(nchar(seg1) < 5, sprintf("%05d", as.numeric(seg1)), as.character(seg1)))] # Pad seg1
+  data[, `:=`(PRODUCTNDC = paste(seg1_padded, seg2, sep = "-"))]                        # Standard PRODUCTNDC format
+  
+  # Convert the extracted date (string) to Date object
   date_var <- as.Date(date_var, format = "%Y%m%d")
   
-  # Select the required columns and add the "date" column
+  # Select relevant columns for the output, adding the processed date
   data_selected <- data[, .(
     drugname,
     formulary_id,
@@ -143,30 +141,30 @@ process_file <- function(file_path, date_var) {
   )]
 }
 
+# Set working directory to user-defined location (edit as needed)
 setwd("YOUR DIRECTORY")
 
-# Apply the function to all files and row bind the results to one data frame:
+# Process all files, combine their output, deduplicate, and write to parquet
 combined_data <- mapply(
-  process_file, # the function
-  names_df$file_path, # the files
-  names_df$date, # date 12/31 or 06/30
+  process_file,                     # The function to apply
+  names_df$file_path,               # File paths (argument 1)
+  names_df$date,                    # Dates parsed from filenames (argument 2)
   SIMPLIFY = FALSE
-) %>% bind_rows() %>% 
-  distinct(drugname, 
-           date, 
-           formulary_id, 
-           ndc11_str, 
-           ndc_raw, 
-           PRODUCTNDC, 
-           rxcui, 
-           prior_authorization_yn,     
-           tier_level_value,
-           step_therapy_yn,
-           quantity_limit_yn,
-           quantity_limit_amount,
-           quantity_limit_days) %>% 
-  write_parquet("parquet/combined_data.parquet")
-
-
-
-
+) %>%
+  bind_rows() %>%                   # Combine all processed data frames
+  distinct(
+    drugname, 
+    date, 
+    formulary_id, 
+    ndc11_str, 
+    ndc_raw, 
+    PRODUCTNDC, 
+    rxcui, 
+    prior_authorization_yn,     
+    tier_level_value,
+    step_therapy_yn,
+    quantity_limit_yn,
+    quantity_limit_amount,
+    quantity_limit_days
+  ) %>%                             # Remove duplicate rows based on these key columns
+  write_parquet("parquet/combined_formulary_data.parquet")  # Save as parquet for efficient storage and downstream use
