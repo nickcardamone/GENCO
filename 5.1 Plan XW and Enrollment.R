@@ -176,13 +176,13 @@ combined_plan_data <- combined_plan_data %>%
   mutate(plan_id = str_pad(plan_id, 3, pad = "0")) %>% 
   distinct()
 
-#write.csv(combined_plan_data, "combined_plan_data_n=134198-5-29-2025.csv")
+#write.csv(combined_plan_data, "combined_plan_data_n=134198-5-30-2025.csv")
 
 # Load Plan-Formulary Data
 # We added 2024 data in June 2025 so instead of re-downloading everything, just download, process, and tack on new data to old dataset.
 
 combined_plan_data_old <- read.csv("input/combined_plan_data_n=134198-10-31-2024.csv")
-combined_plan_data_new <- read.csv("combined_plan_data_n=134198-5-29-2025.csv")
+combined_plan_data_new <- read.csv("combined_plan_data_n=134198-5-30-2025.csv")
 
 combined_plan_data <- rbind(combined_plan_data_old, combined_plan_data_new) %>% distinct()
 
@@ -423,6 +423,7 @@ ggplot(enrollment_period, aes(x = date, y = enrollment, fill = plan_id)) +
   geom_col(position = "stack") + theme(legend.position = "none")
 
 write_parquet(enrollment_period, 'parquet/enrollment_period.parquet')
+
 
 
 
