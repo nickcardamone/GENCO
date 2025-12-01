@@ -335,11 +335,6 @@ plot_cohorts <- function(c_date) {
     theme_minimal()
 }
 
-# Example calls for several conversion dates:
-plot_cohorts("2017-12-31")
-plot_cohorts("2018-06-30")
-plot_cohorts("2019-06-30")
-# ...add more as needed
 
 # --- COHORTS: COMBINED COMPARISON ---------------------------------------------
 
@@ -370,11 +365,6 @@ plot_cohorts_combined <- function(c_date) {
     theme_minimal()
 }
 
-# Example calls for combined cohorts:
-plot_cohorts_combined("2017-12-31")
-plot_cohorts_combined("2018-06-30")
-# ...add more as needed
-
 # --- COLLAPSE FOR EVENT STUDY -------------------------------------------------
 
 all_comparison_dat <- function(c_date) {
@@ -399,7 +389,6 @@ all_comparison_dat <- function(c_date) {
 
 # Aggregate all for event study
 d1 <- all_comparison_dat("2017-12-31")
-# ... d2, d3, ..., d11
 
 # Combine all event study datasets
 d_full <- rbind.data.frame(d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11) %>%
@@ -482,7 +471,5 @@ eventPlotResults$ymin_ptwise
 ggplot(eventPlotResults, aes(x = eventTime, y = estimate)) +
   geom_pointrange(aes(ymin = ymin_ptwise, ymax = ymax_ptwise))
 
-# =====================================================================
-# END OF SCRIPT
-# =====================================================================
+
 
