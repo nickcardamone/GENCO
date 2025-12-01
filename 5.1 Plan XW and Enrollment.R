@@ -344,7 +344,5 @@ ggplot(enrollment_period, aes(x = date, y = enrollment, fill = plan_id)) +
 # Save result
 write_parquet(enrollment_period, 'parquet/enrollment_period.parquet')
 
-# =====================================================
-# END OF SCRIPT
-# =====================================================
+
 
